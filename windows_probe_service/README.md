@@ -1,0 +1,182 @@
+# SOAR Windows 本地连通性服务
+
+本服务配合本目录上一级的 `SOAR 批量封堵调度.txt` 油猴脚本使用。在原站普通或高级检索查询成功后，脚本提取当前页的公网 IPv4、域名和明确对应的 TCP 端口，在原站已有 IPv4 文本上加绿色（连通）或红色（无法连通）底色，不新增列。悬停查看检测原因；未检测或被排除的目标保持原样。网络探测不参与告警处置判断。
+
+**仅探测公网 IPv4，排除已知 CDN/WAF、DNS 服务器、内网和特殊地址。** IPv6、`0.0.0.0`、回环、链路本地、组播、保留和特殊用途地址直接跳过。域名只查询 A 记录并检查 CNAME，服务端逐个检查解析出的 IPv4，随后只向已检查的数字 IPv4 发起检测；不会再次解析域名后直接连接。
+
+## 免安装 EXE 使用
+
+发布版为 **`SOARProbe.exe`**，已包含 Python、FastAPI、依赖和默认 CDN 规则。运行电脑无须安装 Python、运行 `Install.cmd` 或安装 Telnet 客户端。
+
+1. 解压 Windows x64 发布包，将 `SOARProbe.exe` 放到固定目录，双击启动并保持窗口打开。
+2. 窗口显示本地地址后，按 **C** 复制配对令牌。在原站表格上方“配置”中填写地址和令牌，开启自动探测。
+3. 按 **L** 打开日志文件夹，按 **Q** 或 `Ctrl+C` 停止服务；直接关闭窗口也会停止。
+
+首次启动自动创建 `%LOCALAPPDATA%\SOARProbe\config.json`。换目录、覆盖升级 EXE 或重复启动不会重置已保存的令牌和设置。服务仅绑定 `127.0.0.1`；重复运行遇到端口占用时会提示，不会关闭原有实例。启动出错时，直接双击的窗口会保留错误信息，按回车关闭。
+
+独立程序还支持这些命令，均不依赖外部 Python：
+
+```powershell
+.\SOARProbe.exe --copy-token
+.\SOARProbe.exe --show-token
+.\SOARProbe.exe --self-test
+.\SOARProbe.exe --update-cdn-rules
+```
+
+`--show-token` 只在显式调用时显示令牌；`--self-test` 不创建配置、不发起 DNS/ICMP/TCP 探测；更新 CDN 规则需要联网，成功后保存到用户数据目录并在下次启动时生效。损坏的覆盖规则会阻止服务启动，避免无规则探测。日志和配置均不写入 EXE 的临时解包目录。
+
+**源码包与发布包不同。** 当前源码包提供下面的 Windows 构建流程；如果目录中没有 `SOARProbe.exe`，需先在 Windows 构建。不能把源码 ZIP 或其他系统生成的二进制当成 Windows EXE。
+
+## 从源码构建 Windows EXE
+
+构建电脑需要 Windows 10/11 x64 和 64 位 Python 3.11 或更新版本；最终使用电脑不需要 Python。建议用 Python 3.12 构建。
+
+1. 将本目录完整放到 Windows 构建电脑。
+2. 双击 **`Build.cmd`**。首次构建需联网安装固定版本的构建依赖，脚本使用独立 `.build-venv`，不会修改系统 Python 依赖。
+3. 构建脚本先运行离线测试，再打包、自检 EXE 并检查 Windows x64 文件格式；还会启动本地健康及认证检查，不下发任何探测目标。
+4. 构建输出为 `dist\SOARProbe.exe` 和 `dist\SOARProbe-Windows-x64.zip`。将发布 ZIP 发给使用者即可，使用者不用复制源码、虚拟环境或安装脚本。
+
+包内同时提供 `.github/workflows/build-windows-probe.yml`，可使用 GitHub 提供的 Windows 构建环境，本机无需安装 Python：
+
+1. 将构建包中的 `windows_probe_service` 文件夹和 `.github` 文件夹上传到自己的仓库，保持目录层级。
+2. 在仓库 **Actions → Build Windows probe EXE → Run workflow** 手动运行。
+3. 构建成功后下载 `SOARProbe-Windows-x64` artifact，解压获得 EXE、发布 ZIP 和校验文件。
+
+上传范围仅需构建包内容，不要上传本机配置、令牌或诊断日志。工作流仅手动触发，不会自动发布 release。
+
+Windows EXE 必须在 Windows 上构建，不能将 macOS 产物转换或改名为 Windows EXE。请使用 Windows 构建脚本通过检查后生成的发布 ZIP。依据见 [PyInstaller 官方要求](https://github.com/pyinstaller/pyinstaller#requirements)。
+
+## 直接运行 Python 源码
+
+先更新油猴脚本：将安装包内 `SOAR-19.0.user.js`（或本目录上一级的 `SOAR 批量封堵调度.txt`）完整内容替换到原有脚本编辑器并保存，然后刷新原站页面。若通过导入新增了脚本，请停用旧副本，避免同时运行多个版本。
+
+1. 安装 Windows 64 位 Python 3.11 或更新版本，推荐 Python 3.11–3.13。安装程序中启用 Python launcher（`py`）。
+2. 将整个 `windows_probe_service` 文件夹复制到 Windows 的固定目录，例如 `C:\SOAR\windows_probe_service`，保持所有文件一起复制，包含 `cdn_rules.json`。
+3. 双击 `Install.cmd`。它创建目录内的 `.venv`，安装 `requirements.txt`，创建持久配置。首次安装需要能够访问所配置的 Python 包源。无需以管理员身份运行。
+4. 双击 `Start.cmd`，保持窗口运行。默认服务地址为 `http://127.0.0.1:8765`；关闭窗口或按 `Ctrl+C` 停止服务。
+5. 双击 `Show-Token.cmd`，复制显示的配对令牌。在原站告警表格上方点击“配置”（也可在工作台“设置 → 原站 IPv4 连通性探测”进入），填写服务地址、令牌，勾选“查询后自动探测当前页 IPv4”并保存。“测试连接”仅验证服务和令牌，不提交探测任务。
+6. 在**原站主页面**重新查询一次。仅本次成功查询返回的当前页进入探测，翻页也使用新页结果；无须在插件中执行告警处置查询。
+
+脚本的开关、连接配置、额外排除 IPv4、源端口检测设置保存到该站点的 `localStorage`。刷新或重开页面后保留；不要清理站点存储。令牌不要附在发给他人的日志中。服务端不会记录 Authorization 请求头，也不会将令牌写入诊断日志。`Show-Token.cmd` 只在显式运行时将令牌显示到该窗口。
+
+沿用工作台单实例规则：**只有运行页执行自动探测**。其他原站页面保留启用/接管入口，需要在该页探测时先接管。关闭运行页后，其他页不会自动启用，需要手动点击入口；已有设置继续保留。
+
+浏览器和 Python 服务必须运行在**同一台 Windows 电脑**。如果浏览器在远程桌面、虚拟机或另一台电脑上，`127.0.0.1` 指向的是浏览器所在系统。探测结果代表这台电脑的网络可达性。
+
+## 服务配置和持久化
+
+默认文件位于 `%LOCALAPPDATA%\SOARProbe\`，重新安装本目录不会覆盖已有令牌：
+
+| 文件 | 用途 |
+| --- | --- |
+| `config.json` | 配对令牌、端口、并发、超时和缓存配置 |
+| `cdn_custom_rules.json` | 可选的额外 CDN CIDR/域名排除规则 |
+| `logs\probe.jsonl` | 详细 JSON 日志，包含查询 ID、任务 ID、目标、解析地址、跳过原因、结果和耗时 |
+
+首次创建的 `config.json`：
+
+```json
+{
+  "token": "首次安装自动生成的随机令牌",
+  "port": 8765,
+  "concurrency": 16,
+  "timeoutMs": 2000,
+  "operationsPerSecond": 50,
+  "cacheSeconds": 60,
+  "excludedCidrs": []
+}
+```
+
+修改后重启 `Start.cmd`。端口变化时同步修改脚本服务地址；令牌变化时重新配对。`concurrency` 范围 1–64，单项超时 200–10000 毫秒，每秒操作上限 1–200。默认在全服务范围统一限流，不随浏览器页面数增加并发。
+
+服务始终只绑定 `127.0.0.1`，不支持改成 `0.0.0.0`。请保持单进程运行；不要启用 Uvicorn 多 worker 或 reload。重复启动会报告端口已占用，原服务可继续使用。
+
+日志按 4 MiB 轮转，保留当前文件和 5 个历史文件；任务结果保存在内存，最多保留 32 个任务，已完成任务约一小时后可被清理。配置不会随日志和任务清理。相同目标与相同排除配置会合并并短时复用缓存，记录 `cached` 字段及完成时间。页面日志保存当前会话最近 1500 条诊断，导出时还包含当前完整结果；需长期归档时请导出，服务端另有持久日志。
+
+## IPv4、公网、DNS 和 CDN 排除
+
+服务端的排除判断具有最终决定权。即使脚本误传了私网地址，或域名解析出私网地址，服务也不会向它发起 ICMP/TCP 检测。IPv6 不探测，也不会为域名发起 AAAA 查询。
+
+内置清单排除常见公共 DNS（例如 `8.8.8.8`、`1.1.1.1`、`223.5.5.5`、`119.29.29.29`、`114.114.114.114` 等）；启动时还会排除 Windows 当前配置的 DNS 服务器。明确的 DNS 服务端口 `53`、`853` 也会跳过。全网 DNS 服务器无法通过固定名单穷举，单位 DNS 请加入额外排除配置。
+
+原站“配置 → 更多设置 → 额外排除的 IPv4”每行填写一个 IPv4。此清单随每批任务下发，服务会在域名解析后再次应用，包含该 IPv4 的结果也不会发起探测。不同排除清单的任务不会共用可绕过规则的缓存。在服务 `config.json` 的 `excludedCidrs` 中还可设置本机固定排除网段，例如 `["203.0.113.10/32"]`（示例为文档保留地址；实际请替换），修改服务配置后重启。
+
+
+`cdn_rules.json` 是附带的已知 CDN/WAF IP 网段和域名后缀库，来源、版本、更新时间及授权见文件本身和 `LICENSE.cdncheck.md`。规则库不是全网 CDN 的完整证明；新分配网段、私有 CDN 或未公开节点仍可能未收录。命中 IP 网段、原域名或解析链 CNAME 后均跳过检测。未收录情况可以补充自定义规则。数据损坏或缺失时服务停止启动，避免无规则探测。
+
+在 `%LOCALAPPDATA%\SOARProbe\cdn_custom_rules.json` 增加规则示例：
+
+```json
+{
+  "cidrs": [
+    {"cidr": "192.0.2.0/24", "provider": "Example CDN", "source": "本地人工规则"}
+  ],
+  "domainSuffixes": [
+    {"suffix": "cdn.example.com", "provider": "Example CDN", "source": "本地人工规则"}
+  ]
+}
+```
+
+示例地址仅用于展示格式，属于文档保留段，本就会跳过。实际使用时填写要排除的网段和后缀。后缀匹配完整 DNS 标签，例如 `cdn.example.com` 同时排除 `a.cdn.example.com`，不会匹配 `evilcdn.example.com`。规则修改后重启服务。
+
+附带 `update_cdn_rules.py` 可手动刷新规则库。在服务文件夹打开 PowerShell：
+
+```powershell
+# 联网更新；读取 ProjectDiscovery/cdncheck CDN/WAF 和域名数据，校验 Git blob SHA
+.\.venv\Scripts\python.exe update_cdn_rules.py
+# 或导入已下载的上游 sources_data.json，适合离线环境
+.\.venv\Scripts\python.exe update_cdn_rules.py --input C:\Downloads\sources_data.json
+```
+
+刷新失败不会替换原文件；成功校验后原子替换，重启服务后生效。自定义规则保存在独立文件中，更新不会覆盖。服务启动和查询时不会自动从互联网下载规则库。健康接口提供当前规则版本和数量，便于核对。仅使用上游 CDN/WAF 分类及域名后缀，不将所有公有云网段当作 CDN。
+
+## 结果含义
+
+| 状态 | 含义 |
+| --- | --- |
+| Ping `reachable` | Windows ICMP API 收到成功回应，另有 `roundTripMs` |
+| Ping `timeout/unreachable/error` | 无回应、不可达或本机 API 错误；不能据此认定主机离线 |
+| TCP `open` | 到该 IP/端口的 TCP 连接建立成功，不代表业务内容正确 |
+| TCP `refused/timeout/error` | 连接被拒绝、超时或网络/系统错误 |
+| `skipped_private` | 非公网或特殊用途地址，没有发起探测 |
+| `skipped_cdn` | 命中已知 CDN/WAF 网段、域名或 CNAME，没有发起探测 |
+| `skipped_dns` | 常见公共 DNS、系统 DNS、DNS 域名或 DNS 端口，没有发起探测 |
+| `skipped_custom` | 命中页面额外排除 IPv4 或服务排除网段，没有发起探测 |
+| `skipped_ipv6` | 仅支持 IPv4，没有发起探测 |
+
+Windows Ping 使用原生 IPv4 `IcmpSendEcho`，不解析中英文 `ping.exe` 输出，无须开启 Telnet 客户端，也不使用原始套接字。TCP 使用 asyncio 建立连接并立即关闭，不发送登录或业务数据。源端口通常是临时客户端端口，因此脚本默认不检测源端口；没有明确端口的域名只执行 DNS/ICMP。显式 UDP 端点不会执行 TCP 检测。
+
+最多接受每任务 4000 个目标、4 个同时活动任务、8192 个排队的唯一目标。一次 DNS 返回超过 64 个地址或 A/CNAME 解析证据不完整时，该目标停止探测并记录错误，避免凭不完整的 CDN 判定发起连接。重复目标跨行共享结果，翻页/重新查询后旧结果不应覆盖新表格。
+
+## 排错
+
+- **无法连接服务：** 检查 `Start.cmd` 窗口是否运行，打开 `http://127.0.0.1:8765/health` 应看到 `status: "ok"`。此接口不返回令牌。
+- **401：** 服务令牌与脚本中保存的令牌不一致，重新运行 `Show-Token.cmd` 并保存脚本配置。
+- **429：** 全局队列或活动任务达到上限，稍后重新探测，避免快速重复查询。
+- **端口占用：** 关闭重复实例，或修改 `config.json` 的 `port` 并同步脚本地址。
+- **没有某个目标的检测：** 查看脚本详细日志和服务 JSON 日志，确认是否属于 IPv6、非公网、DNS、CDN 或自定义排除、没有端口、UDP、数量上限或 DNS 解析失败。
+- **浏览器访问限制：** 脚本使用 `GM_xmlhttpRequest` 并声明本机 `@connect`；新版本浏览器/油猴可能要求授予本地访问权限。不要通过关闭整个浏览器安全策略解决。
+
+提供日志时可以导出脚本探测日志并附上服务端相关时间段的 `probe.jsonl`。其中可能包含告警目标地址，按需要脱敏；不要附上 `config.json` 或 `Show-Token.cmd` 窗口中的令牌。
+
+## API v1
+
+除 `GET /health` 外，都要求 `Authorization: Bearer <token>`，仅接受本机来源和本机 Host。
+
+- `GET /v1/auth-check`：认证检查，不创建任务、不执行 DNS/ICMP/TCP。
+- `POST /v1/probes`：提交 `{"queryId":"q1","excludedHosts":["93.184.216.34"],"targets":[{"id":"t1","host":"example.com","port":443}]}`，返回 HTTP 202 和 `jobId/queryId/total/cursor`。`port` 可省略或为 `null`；`excludedHosts` 可省略，最多 200 个规范 IPv4。
+- `GET /v1/probes/{jobId}?after=0`：返回任务状态、`total/completed/cursor` 和该游标之后完成的 `results`。使用上次返回的 `cursor` 继续读取；结果完成顺序不保证与提交顺序一致，使用目标 `id` 回填。
+- `DELETE /v1/probes/{jobId}`：取消该任务后续结果。尚未开始且无人订阅的共享目标会跳过；已发出的单次 ICMP/TCP 在有限超时内结束，其他任务订阅的共享目标继续执行。
+
+每个目标返回 `id/host/port/resolved/aliases/dns/ping/tcp/cached/finishedAt`；DNS 命中 CDN 时附带 `skipped`。跳过项含 `reason/rule/source`，规则有供应商信息时附带 `provider`。不提供任意命令执行、端口范围扫描或转发原站登录凭据的接口。
+
+## 离线测试
+
+在本目录运行：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+测试通过模拟 DNS、ICMP、TCP 和本地 HTTP ASGI 请求检查策略、队列、去重、取消和协议，不向真实目标发起网络探测。Windows 原生 ICMP 调用的结构与参数有离线模拟验证；实际 Windows 网络和浏览器联调需在部署机器验证。安装脚本未在此 macOS 开发环境执行。

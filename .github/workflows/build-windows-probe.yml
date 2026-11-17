@@ -1,0 +1,36 @@
+name: Build Windows probe EXE
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: '3.12'
+          architecture: x64
+          cache: pip
+          cache-dependency-path: |
+            windows_probe_service/requirements.txt
+            windows_probe_service/requirements-dev.txt
+            windows_probe_service/requirements-build.txt
+      - name: Test, build and smoke the frozen Windows service
+        shell: powershell
+        run: .\windows_probe_service\Build.ps1
+      - name: Upload verified standalone EXE
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: SOARProbe-Windows-x64
+          path: |
+            windows_probe_service/dist/SOARProbe.exe
+            windows_probe_service/dist/SOARProbe-Windows-x64.zip
+            windows_probe_service/dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
