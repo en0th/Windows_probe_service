@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Optional release version, for example v1.1.1 (blank builds only)'
+        description: 'Optional release version, for example v1.2.1 (blank builds only)'
         required: false
         default: ''
         type: string
@@ -37,6 +37,7 @@ jobs:
           path: |
             windows_probe_service/dist/SOARProbe.exe
             windows_probe_service/dist/SOARProbe-Windows-x64.zip
+            windows_probe_service/dist/SOARProbe-Windows-x64-portable.zip
             windows_probe_service/dist/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 14
@@ -77,7 +78,7 @@ jobs:
           PY
           (cd dist && sha256sum -c SHA256SUMS.txt)
           gh release create "$RELEASE_TAG" \
-            dist/SOARProbe.exe dist/SOARProbe-Windows-x64.zip dist/SHA256SUMS.txt \
+            dist/SOARProbe.exe dist/SOARProbe-Windows-x64.zip dist/SOARProbe-Windows-x64-portable.zip dist/SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
             --title "SOARProbe $RELEASE_TAG · Windows x64" --notes-file RELEASE_NOTES.md --draft
           gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false

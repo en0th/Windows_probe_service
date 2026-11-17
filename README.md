@@ -4,9 +4,11 @@ Standalone local FastAPI probe service for the SOAR userscript. Only public IPv4
 
 The Windows release runs without Python or dependency installation. Double-click `SOARProbe.exe`; press C to copy the pairing token, L to open logs, Q to quit. Settings remain in `%LOCALAPPDATA%\SOARProbe`.
 
+For application-control startup errors, try the complete `SOARProbe-Windows-x64-portable.zip`: extract the entire SOARProbe directory and run Start-SOARProbe.cmd. It loads dependencies from a fixed _internal directory, but does not grant Smart App Control trust.
+
 Download the ready-to-run [Windows release](https://github.com/en0th/Windows_probe_service/releases/latest): `SOARProbe.exe` or the complete `SOARProbe-Windows-x64.zip`. No Python or dependency installation is needed.
 
-Build with [GitHub Actions](https://github.com/en0th/Windows_probe_service/actions/workflows/build-windows-probe.yml); leave `release_tag` blank for an artifact-only build, or enter the matching service version (for example `v1.2.0`) to publish a Release. The workflow runs offline tests, checks PE x64 and frozen resources, and starts the bundled service for loopback health/authentication checks without target probes. Release publishing uses a separate job and publishes only after the complete assets have been uploaded to a draft.
+Build with [GitHub Actions](https://github.com/en0th/Windows_probe_service/actions/workflows/build-windows-probe.yml); leave `release_tag` blank for an artifact-only build, or enter the matching service version (for example `v1.2.1`) to publish a Release. The workflow runs offline tests, checks PE x64 and frozen resources, and starts the bundled service for loopback health/authentication checks without target probes. Release publishing uses a separate job and publishes only after the complete assets have been uploaded to a draft.
 
 [Chinese installation and build guide](windows_probe_service/README.md)
 

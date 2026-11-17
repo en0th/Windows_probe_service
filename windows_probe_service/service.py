@@ -36,7 +36,7 @@ from network_policy import NetworkPolicy
 import windows_icmp
 
 API_VERSION = 1
-SERVICE_VERSION = "1.2.0"
+SERVICE_VERSION = "1.2.1"
 MAX_TARGETS = 4000
 MAX_DNS_ADDRESSES = 64
 DNS_RESOLVER_SEQUENCE = ("system", "8.8.8.8", "223.5.5.5")
@@ -67,6 +67,10 @@ def run_self_test() -> dict:
     import pydantic
     import dns
     import importlib
+    core_binary = importlib.import_module("pydantic_core._pydantic_core")
+    frozen = bool(getattr(sys, "frozen", False))
+    runtime_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)).resolve()
+    bundle_layout = ("onedir" if runtime_dir == Path(sys.executable).resolve().parent / "_internal" else "onefile") if frozen else "source"
     for module in ("uvicorn.protocols.http.h11_impl", "uvicorn.lifespan.on", "uvicorn.loops.asyncio", "dns._asyncio_backend", "anyio._backends._asyncio"):
         importlib.import_module(module)
     policy = NetworkPolicy(resource_path("cdn_rules.json"))
@@ -75,7 +79,8 @@ def run_self_test() -> dict:
     if policy.address("0.0.0.0") is None or policy.address("8.8.8.8") is None or policy.address("::1") is None:
         raise RuntimeError("address exclusion self-test failed")
     return {"status": "ok", "service": "soar-network-probe", "version": SERVICE_VERSION,
-            "apiVersion": API_VERSION, "frozen": bool(getattr(sys, "frozen", False)),
+            "apiVersion": API_VERSION, "frozen": frozen, "bundleLayout": bundle_layout,
+            "nativeDependencies": {"pydanticCore": str(Path(core_binary.__file__).resolve())},
             "ipv4Only": True, "cdnRulesVersion": policy.version,
             "cdnCidrs": len(policy.cidrs), "cdnDomainSuffixes": len(policy.domains),
             "dependencies": {"fastapi": fastapi.__version__, "pydantic": pydantic.__version__,
@@ -901,7 +906,9 @@ def launch():
         # Pause only for the standalone double-click experience. CLI and build
         # checks must terminate deterministically instead of waiting for input.
         print(f"SOAR probe startup failed: {error}", file=sys.stderr)
-        if getattr(sys, "frozen", False) and len(sys.argv) == 1:
+        if (getattr(sys, "frozen", False) and len(sys.argv) == 1
+                and os.environ.get("SOAR_PROBE_CMD_LAUNCH") != "1"
+                and getattr(sys.stdin, "isatty", lambda: False)()):
             try:
                 input("Press Enter to close this window...")
             except (EOFError, OSError):

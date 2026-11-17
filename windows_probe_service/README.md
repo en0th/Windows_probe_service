@@ -1,20 +1,39 @@
 # SOAR Windows 本地连通性服务
 
-本服务 v1.2.0 配合 v21.0 或更新的 `SOAR 批量封堵调度.txt` 油猴脚本使用。在原站普通或高级检索查询成功后，脚本提取当前页的公网 IPv4、域名和对应端口，将检测结果直接显示在已有表格中。悬停可查看 DNS、Ping 和端口检测详情；未检测或被排除的目标保持原样。网络探测不参与告警处置判断。
+本服务 v1.2.1 配合 v21.0 或更新的 `SOAR 批量封堵调度.txt` 油猴脚本使用。在原站普通或高级检索查询成功后，脚本提取当前页的公网 IPv4、域名和对应端口，将检测结果直接显示在已有表格中。悬停可查看 DNS、Ping 和端口检测详情；未检测或被排除的目标保持原样。网络探测不参与告警处置判断。
 
 **仅探测公网 IPv4，排除已知 CDN/WAF、DNS 服务器、内网和特殊地址。** IPv6、`0.0.0.0`、回环、链路本地、组播、保留和特殊用途地址直接跳过。域名只查询 A 记录并检查 CNAME，服务端逐个检查解析出的 IPv4，随后只向已检查的数字 IPv4 发起检测；不会再次解析域名后直接连接。
 
 ## 免安装 EXE 使用
 
-发布版为 **`SOARProbe.exe`**，已包含 Python、FastAPI、依赖和默认 CDN 规则。运行电脑无须安装 Python、运行 `Install.cmd` 或安装 Telnet 客户端。
+发布版已包含 Python、FastAPI、依赖和默认 CDN 规则。运行电脑无须安装 Python、运行 `Install.cmd` 或安装 Telnet 客户端。脚本 v21.0 无须为本次服务升级重新修改。
 
-在 [GitHub Releases](https://github.com/en0th/Windows_probe_service/releases/latest) 下载 EXE，或下载包含 EXE、本文档、许可证和校验文件的 `SOARProbe-Windows-x64.zip`。
+在 [GitHub Releases](https://github.com/en0th/Windows_probe_service/releases/latest) 下载：
 
-1. 解压 Windows x64 发布包，将 `SOARProbe.exe` 放到固定目录，双击启动并保持窗口打开。
-2. 窗口显示本地地址后，按 **C** 复制配对令牌。在原站表格上方“配置”中填写地址和令牌，确认自动探测已开启。
-3. 按 **L** 打开日志文件夹，按 **Q** 或 `Ctrl+C` 停止服务；直接关闭窗口也会停止。
+| 发布附件 | 使用方式 |
+| --- | --- |
+| **`SOARProbe-Windows-x64-portable.zip`（推荐）** | 完整解压后运行 `SOARProbe` 文件夹中的程序；运行时依赖保留在 `_internal` 子目录 |
+| `SOARProbe.exe` | 单文件版，启动时将运行依赖解压到临时目录；适合允许这种加载方式的电脑 |
+| `SOARProbe-Windows-x64.zip` | 单文件版 EXE、说明、许可证和校验文件的压缩包；与上一个 EXE 的运行方式相同 |
 
-首次启动自动创建 `%LOCALAPPDATA%\SOARProbe\config.json`。换目录、覆盖升级 EXE 或重复启动不会重置已保存的令牌和设置。服务仅绑定 `127.0.0.1`；重复运行遇到端口占用时会提示，不会关闭原有实例。启动出错时，直接双击的窗口会保留错误信息，按回车关闭。
+1. 先关闭旧服务。将推荐便携包**完整解压**到允许安装软件的固定本地目录，保留 `SOARProbe.exe`、`_internal` 和其他文件的相对位置。不要直接在压缩包内运行，也不要只复制 EXE。
+2. 打开解压后的 `SOARProbe` 文件夹，双击 **`Start-SOARProbe.cmd`**。它会在启动失败时保留窗口，方便复制完整错误；也可直接双击同目录的 `SOARProbe.exe`。启动后保持窗口打开。
+3. 窗口显示本地地址后，按 **C** 复制配对令牌。在原站表格上方“配置”中填写地址和令牌，确认自动探测已开启。
+4. 按 **L** 打开日志文件夹，按 **Q** 或 `Ctrl+C` 停止服务；直接关闭窗口也会停止。
+
+首次启动自动创建 `%LOCALAPPDATA%\SOARProbe\config.json`。换目录、升级发布包或重复启动不会重置已保存的令牌和设置。升级便携版时替换整个程序文件夹，保留用户数据目录。服务仅绑定 `127.0.0.1`；重复运行遇到端口占用时会提示，不会关闭原有实例。
+
+### 出现“应用程序控制策略已阻止此文件”
+
+若错误位于 `_pydantic_core`、其他 `.pyd` 或 DLL 的加载阶段，可先改用推荐便携包。单文件版会临时解压依赖；便携版从解压后的固定目录加载，减少临时目录变化。当前错误本身没有给出被阻止文件的完整路径，尚不能认定临时目录就是触发原因。
+
+便携包**不能保证通过 App Control、WDAC、Smart App Control 或单位应用白名单**。个人电脑启用 **Smart App Control（智能应用控制）** 时，应将它与单位管理的白名单策略区分。固定目录并不使未受信任的 EXE 或依赖 DLL 自动获得信任；发布文件的哈希用于核对完整性，不等同于 Smart App Control 的单应用放行规则。[微软说明](https://support.microsoft.com/en-us/windows/what-is-smart-app-control-285ea03d-fa88-4d56-882e-6698afdb7003)指出，目前不支持对单个应用手动放行。外层 EXE 获得信任也不代表所有依赖 DLL 已受信任。如果拦截原因与应用信誉或受信任签名有关，单独改变打包方式不能代替这些要求。
+
+如果设备由单位管理，请让管理员查看“事件查看器 → 应用程序和服务日志 → Microsoft → Windows → CodeIntegrity → Operational”等对应策略日志，确认具体被阻止的文件、路径和策略，再按单位流程审核相应文件的哈希或受信任签名。不要将这套企业策略审批方式当作个人 Smart App Control 的手动白名单功能。
+
+提供完整错误、被阻止文件路径、版本和包内 `SHA256SUMS.txt` 即可协助核对；不要提供含令牌的 `config.json`。`Start-SOARProbe.cmd` 只保留错误窗口，不修改系统安全策略。无需为了此错误关闭防护、添加整个目录或磁盘的排除规则，或改为管理员运行。
+
+相关背景：[PyInstaller 打包运行方式](https://pyinstaller.org/en/stable/operating-mode.html)、[Microsoft App Control 事件说明](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/app-control-for-business/operations/event-id-explanations)。
 
 独立程序还支持这些命令，均不依赖外部 Python：
 
@@ -25,7 +44,7 @@
 .\SOARProbe.exe --update-cdn-rules
 ```
 
-`--show-token` 只在显式调用时显示令牌；`--self-test` 不创建配置、不发起 DNS/ICMP/TCP 探测；更新 CDN 规则需要联网，成功后保存到用户数据目录并在下次启动时生效。损坏的覆盖规则会阻止服务启动，避免无规则探测。日志和配置均不写入 EXE 的临时解包目录。
+`--show-token` 只在显式调用时显示令牌；`--self-test` 不创建配置、不发起 DNS/ICMP/TCP 探测；更新 CDN 规则需要联网，成功后保存到用户数据目录并在下次启动时生效。损坏的覆盖规则会阻止服务启动，避免无规则探测。日志和配置均不写入程序文件夹或单文件版的临时解包目录。
 
 **源码包与发布包不同。** 当前源码包提供下面的 Windows 构建流程；如果目录中没有 `SOARProbe.exe`，需先在 Windows 构建。不能把源码 ZIP 或其他系统生成的二进制当成 Windows EXE。
 
@@ -35,14 +54,14 @@
 
 1. 将本目录完整放到 Windows 构建电脑。
 2. 双击 **`Build.cmd`**。首次构建需联网安装固定版本的构建依赖，脚本使用独立 `.build-venv`，不会修改系统 Python 依赖。
-3. 构建脚本先运行离线测试，再打包、自检 EXE 并检查 Windows x64 文件格式；还会启动本地健康及认证检查，不下发任何探测目标。
-4. 构建输出为 `dist\SOARProbe.exe` 和 `dist\SOARProbe-Windows-x64.zip`。将发布 ZIP 发给使用者即可，使用者不用复制源码、虚拟环境或安装脚本。
+3. 构建脚本先运行离线测试，再分别生成单文件版和便携版，检查 Windows x64 文件格式和冻结资源，并启动本地健康及认证检查，不下发任何探测目标。最终便携 ZIP 还会解压到带空格的目录，再执行同类检查。
+4. 发布输出为 `dist\SOARProbe.exe`、`dist\SOARProbe-Windows-x64.zip`、`dist\SOARProbe-Windows-x64-portable.zip` 和校验文件。优先将便携 ZIP 发给使用者；使用者完整解压后即可运行，无须复制源码、虚拟环境或安装脚本。
 
 包内同时提供 `.github/workflows/build-windows-probe.yml`，可使用 GitHub 提供的 Windows 构建环境，本机无需安装 Python：
 
 1. 将构建包中的 `windows_probe_service` 文件夹和 `.github` 文件夹上传到自己的仓库，保持目录层级。
 2. 在仓库 **Actions → Build Windows probe EXE → Run workflow** 手动运行。
-3. 构建成功后下载 `SOARProbe-Windows-x64` artifact，解压获得 EXE、发布 ZIP 和校验文件。需要发布 GitHub Release 时，在 `release_tag` 填写与服务版本一致的标签（例如 `v1.2.0`）；留空只构建。
+3. 构建成功后下载 `SOARProbe-Windows-x64` artifact，解压获得 EXE、两种发布 ZIP 和校验文件。需要发布 GitHub Release 时，在 `release_tag` 填写与服务版本一致的标签（例如 `v1.2.1`）；留空只构建。
 
 上传范围仅需构建包内容，不要上传本机配置、令牌或诊断日志。工作流仅手动触发；只有显式填写 `release_tag` 时，独立发布任务才获得写权限，在 Windows 构建、自检和校验成功后上传 Release 附件。用于发布的仓库还需包含 `RELEASE_NOTES.md`。
 
@@ -89,7 +108,7 @@ Windows EXE 必须在 Windows 上构建，不能将 macOS 产物转换或改名�
 }
 ```
 
-修改后重启 `Start.cmd`。端口变化时同步修改脚本服务地址；令牌变化时重新配对。`concurrency` 范围 1–64，单项超时 200–10000 毫秒，每秒操作上限 1–200。默认在全服务范围统一限流，不随浏览器页面数增加并发。
+修改后重启服务（便携版为 `Start-SOARProbe.cmd`，源码版为 `Start.cmd`）。端口变化时同步修改脚本服务地址；令牌变化时重新配对。`concurrency` 范围 1–64，单项超时 200–10000 毫秒，每秒操作上限 1–200。默认在全服务范围统一限流，不随浏览器页面数增加并发。
 
 服务始终只绑定 `127.0.0.1`，不支持改成 `0.0.0.0`。请保持单进程运行；不要启用 Uvicorn 多 worker 或 reload。重复启动会报告端口已占用，原服务可继续使用。
 
@@ -169,8 +188,9 @@ Windows Ping 使用原生 IPv4 `IcmpSendEcho`，不解析中英文 `ping.exe` �
 
 ## 排错
 
-- **无法连接服务：** 检查 `Start.cmd` 窗口是否运行，打开 `http://127.0.0.1:8765/health` 应看到 `status: "ok"`。此接口不返回令牌。
-- **401：** 服务令牌与脚本中保存的令牌不一致，重新运行 `Show-Token.cmd` 并保存脚本配置。
+- **应用程序控制策略阻止 DLL：** 可先尝试完整便携包。个人 Smart App Control 仍可能拒绝未知程序或依赖，按上文区分代码信任与企业策略审批；单位管理设备再由管理员审核对应规则。启动被阻止时可能尚未生成服务日志，请保留错误窗口。
+- **无法连接服务：** 检查服务窗口是否运行，打开 `http://127.0.0.1:8765/health` 应看到 `status: "ok"`。此接口不返回令牌。
+- **401：** 服务令牌与脚本中保存的令牌不一致，在服务窗口按 C 复制令牌后保存脚本配置；源码版也可运行 `Show-Token.cmd`。
 - **429：** 全局队列或活动任务达到上限，稍后重新探测，避免快速重复查询。
 - **端口占用：** 关闭重复实例，或修改 `config.json` 的 `port` 并同步脚本地址。
 - **没有某个目标的检测：** 查看脚本详细日志和服务 JSON 日志，确认是否属于 IPv6、非公网、DNS、CDN、安全过滤清单、自定义排除、UDP、数量上限或 DNS 解析失败。IPv4 无端口只检测 Ping；域名无端口会检测 80、443。
@@ -198,4 +218,4 @@ Windows Ping 使用原生 IPv4 `IcmpSendEcho`，不解析中英文 `ping.exe` �
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-测试通过模拟 DNS、ICMP、TCP 和本地 HTTP ASGI 请求检查策略、队列、去重、取消和协议，不向真实目标发起网络探测。GitHub Actions 在 Windows 上执行测试，并实际启动生成的 EXE 验证冻结资源、健康接口和令牌认证。实际目标的网络可达性取决于部署机器；详细证据记录在日志中。
+测试通过模拟 DNS、ICMP、TCP 和本地 HTTP ASGI 请求检查策略、队列、去重、取消和协议，不向真实目标发起网络探测。GitHub Actions 在 Windows 上执行测试，并实际启动生成的两种 EXE 验证冻结资源、健康接口和令牌认证；便携 ZIP 会完整解压后再次验证。构建环境不复现部署机器的应用控制策略，测试通过不等同于已获得该机器的策略批准。实际目标的网络可达性取决于部署机器；详细证据记录在日志中。
