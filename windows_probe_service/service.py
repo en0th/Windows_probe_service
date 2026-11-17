@@ -36,9 +36,11 @@ from network_policy import NetworkPolicy
 import windows_icmp
 
 API_VERSION = 1
-SERVICE_VERSION = "1.1.1"
+SERVICE_VERSION = "1.2.0"
 MAX_TARGETS = 4000
 MAX_DNS_ADDRESSES = 64
+DNS_RESOLVER_SEQUENCE = ("system", "8.8.8.8", "223.5.5.5")
+DOMAIN_DEFAULT_PORTS = (80, 443)
 MAX_BODY_BYTES = 2 * 1024 * 1024
 def resource_path(name: str) -> Path:
     """Resolve a read-only resource inside a frozen executable or source tree."""
@@ -345,6 +347,31 @@ class Entry:
     started: bool = False
 
 
+@dataclass
+class DnsResolution:
+    addresses: list
+    aliases: list
+    attempts: list
+    resolver: Optional[str] = None
+    status: str = "ok"
+    error: Optional[str] = None
+
+    def __iter__(self):
+        # Preserve the existing two-value resolver contract for callers while
+        # carrying the ordered resolver evidence alongside those values.
+        yield self.addresses
+        yield self.aliases
+
+
+def dns_failure_details(exc):
+    if isinstance(exc, (asyncio.TimeoutError, dns.exception.Timeout)):
+        return "timeout", "dns_timeout"
+    return "error", ("dns_nxdomain" if isinstance(exc, dns.resolver.NXDOMAIN)
+                     else "dns_nodata" if isinstance(exc, dns.resolver.NoAnswer)
+                     else "dns_server_failure" if isinstance(exc, dns.resolver.NoNameservers)
+                     else "dns_failed_or_incomplete")
+
+
 class CapacityError(Exception):
     pass
 
@@ -487,8 +514,15 @@ class ProbeEngine:
                     continue
                 except Exception as exc:
                     self.log("probe_internal_error", host=entry.host, port=entry.port, error=type(exc).__name__)
+                    lookup = {"question": entry.host, "recordType": "A", "answers": [], "aliases": [],
+                              "attempts": [], "resolver": None, "elapsedMs": 0}
+                    try:
+                        ipaddress.ip_address(entry.host)
+                        lookup["status"] = "not_applicable"
+                    except ValueError:
+                        lookup.update(status="error", error="probe_internal_error")
                     result = {"resolved": [], "dns": {"status": "error", "elapsedMs": 0,
-                              "error": "probe_internal_error"}, "ping": [], "tcp": []}
+                              "error": "probe_internal_error"}, "nslookup": lookup, "ping": [], "tcp": []}
                 if self.settings.cache_seconds > 0:
                     self.cache[entry.key] = (time.monotonic() + self.settings.cache_seconds, result)
                     self.cache.move_to_end(entry.key)
@@ -516,20 +550,50 @@ class ProbeEngine:
                 raise AbandonedProbe()
             return await operation()
 
-    async def _resolve(self, host):
-        resolver = dns.asyncresolver.Resolver()
-        resolver.lifetime = self.settings.timeout_ms / 1000
+    async def _resolve(self, host, should_continue=None):
+        attempts = []
+        budget = self.settings.timeout_ms / 1000
+        for server in DNS_RESOLVER_SEQUENCE:
+            if should_continue is not None and not should_continue():
+                raise AbandonedProbe()
+            started = None
 
-        # IPv4 only: do not issue AAAA queries, even for dual-stack names.
-        answer = await resolver.resolve(host, "A", search=False, lifetime=resolver.lifetime)
-        aliases = [str(answer.canonical_name).rstrip(".")]
-        for rrset in answer.response.answer:
-            if rrset.rdtype == 5:
-                aliases.extend(str(record.target).rstrip(".") for record in rrset)
-        addresses = [record.address for record in answer]
-        if not addresses:
-            raise socket.gaierror("dns_no_addresses")
-        return list(dict.fromkeys(str(ipaddress.ip_address(address)) for address in addresses)), list(dict.fromkeys(aliases))
+            async def lookup_once():
+                nonlocal started
+                started = time.monotonic()
+                resolver = dns.asyncresolver.Resolver() if server == "system" else dns.asyncresolver.Resolver(configure=False)
+                if server != "system":
+                    resolver.nameservers = [server]
+                resolver.lifetime = budget
+                resolver.timeout = budget
+                # A records only. dnspython follows the CNAME chain in the
+                # same bounded request and handles truncated UDP replies.
+                answer = await resolver.resolve(host, "A", search=False, lifetime=budget)
+                canonical_name = str(answer.canonical_name).rstrip(".")
+                aliases = [canonical_name] if canonical_name.lower() != host.lower().rstrip(".") else []
+                for rrset in answer.response.answer:
+                    if rrset.rdtype == 5:
+                        aliases.extend(str(record.target).rstrip(".") for record in rrset)
+                addresses = list(dict.fromkeys(str(ipaddress.ip_address(record.address)) for record in answer
+                                               if ipaddress.ip_address(record.address).version == 4))
+                if not addresses:
+                    raise dns.resolver.NoAnswer()
+                return addresses, list(dict.fromkeys(aliases))
+
+            try:
+                # Count and limit every DNS attempt separately. Do not hold an
+                # outer I/O slot while acquiring the next attempt's slot.
+                addresses, aliases = await self._io(lambda: asyncio.wait_for(lookup_once(), budget + 0.1), should_continue)
+                elapsed = round((time.monotonic() - started) * 1000)
+                attempts.append({"server": server, "status": "ok", "elapsedMs": elapsed,
+                                 "answers": addresses[:MAX_DNS_ADDRESSES], "aliases": aliases})
+                return DnsResolution(addresses, aliases, attempts, resolver=server)
+            except (OSError, dns.exception.DNSException, ValueError, asyncio.TimeoutError) as exc:
+                status, error = dns_failure_details(exc)
+                elapsed = round((time.monotonic() - started) * 1000) if started is not None else 0
+                attempts.append({"server": server, "status": status, "error": error, "elapsedMs": elapsed, "answers": []})
+        last = attempts[-1]
+        return DnsResolution([], [], attempts, status=last["status"], error=last["error"])
 
     async def _ping(self, address):
         return await asyncio.to_thread(windows_icmp.ping, address, self.settings.timeout_ms)
@@ -561,25 +625,49 @@ class ProbeEngine:
                     pass
 
     async def probe(self, host, port, should_continue=None, excluded_hosts=(), excluded_cidrs=()):
-        result = {"resolved": [], "dns": {"status": "ok", "elapsedMs": 0}, "ping": [], "tcp": []}
+        try:
+            literal_address = ipaddress.ip_address(host)
+        except ValueError:
+            literal_address = None
+        is_domain = literal_address is None
+        # The explicit nslookup evidence describes the same A/CNAME lookup used
+        # to pin Ping/TCP destinations. Do not invoke a shell or resolve again.
+        nslookup = {"question": host, "recordType": "A", "status": "pending" if is_domain else "not_applicable",
+                    "answers": [], "aliases": [], "attempts": [], "resolver": None, "elapsedMs": 0}
+        result = {"resolved": [], "aliases": [], "dns": {"status": "ok", "elapsedMs": 0},
+                  "nslookup": nslookup, "ping": [], "tcp": []}
         request_networks = tuple(ipaddress.ip_network(value, strict=True) for value in excluded_cidrs)
         if port in {53, 853}:
             skip = {"status": "skipped_dns", "reason": "dns_service_port", "rule": str(port), "source": "built_in_dns_policy"}
+            if is_domain:
+                nslookup.update(skip)
             return {**result, "dns": {"elapsedMs": 0, **skip}, "skipped": skip}
         domain_skip = self.policy.domain(host)
         if domain_skip:
+            if is_domain:
+                nslookup.update({"status": "skipped_cdn", **domain_skip})
             return {**result, "dns": {"status": "skipped_cdn", "elapsedMs": 0, **domain_skip},
                     "skipped": {"status": "skipped_cdn", **domain_skip}}
         started = time.monotonic()
         try:
-            try:
-                ip = ipaddress.ip_address(host)
-                addresses, aliases = [str(ip)], []
-            except ValueError:
-                addresses, aliases = await self._io(lambda: asyncio.wait_for(self._resolve(host),
-                    self.settings.timeout_ms / 1000 + 0.1), should_continue)
+            if is_domain:
+                if should_continue is not None and not should_continue():
+                    raise AbandonedProbe()
+                resolution = await self._resolve(host, should_continue=should_continue)
+                addresses, aliases = resolution
+                nslookup["attempts"] = getattr(resolution, "attempts", [{"server": "system", "status": "ok", "answers": addresses[:MAX_DNS_ADDRESSES], "elapsedMs": round((time.monotonic() - started) * 1000)}])
+                nslookup["resolver"] = getattr(resolution, "resolver", "system")
+                if getattr(resolution, "status", "ok") != "ok":
+                    result["dns"] = {"status": resolution.status, "error": resolution.error, "elapsedMs": round((time.monotonic() - started) * 1000)}
+                    nslookup.update(result["dns"])
+                    return result
+            else:
+                addresses, aliases = [str(literal_address)], []
             result["resolved"], result["aliases"] = addresses, aliases
             result["dns"]["elapsedMs"] = round((time.monotonic() - started) * 1000)
+            if is_domain:
+                nslookup.update(status="ok", answers=addresses[:MAX_DNS_ADDRESSES], aliases=list(aliases),
+                                elapsedMs=result["dns"]["elapsedMs"])
             alias_skip = next((self.policy.domain(alias) for alias in aliases if self.policy.domain(alias)), None)
             if alias_skip:
                 return {**result, "dns": {**result["dns"], "status": "skipped_cdn", **alias_skip},
@@ -587,13 +675,25 @@ class ProbeEngine:
             if len(addresses) > MAX_DNS_ADDRESSES:
                 result["resolved"] = addresses[:MAX_DNS_ADDRESSES]
                 result["dns"].update(status="error", error="dns_address_limit_exceeded")
+                if is_domain:
+                    nslookup.update(status="error", error="dns_address_limit_exceeded")
                 return result
         except (asyncio.TimeoutError, dns.exception.Timeout):
             result["dns"] = {"status": "timeout", "elapsedMs": round((time.monotonic() - started) * 1000), "error": "dns_timeout"}
+            if is_domain:
+                nslookup.update(result["dns"])
+                if not nslookup["attempts"]:
+                    nslookup["attempts"] = [{"server": "system", **result["dns"], "answers": []}]
             return result
-        except (OSError, dns.exception.DNSException, ValueError):
-            result["dns"] = {"status": "error", "elapsedMs": round((time.monotonic() - started) * 1000), "error": "dns_failed_or_incomplete"}
+        except (OSError, dns.exception.DNSException, ValueError) as exc:
+            _, error = dns_failure_details(exc)
+            result["dns"] = {"status": "error", "elapsedMs": round((time.monotonic() - started) * 1000), "error": error}
+            if is_domain:
+                nslookup.update(result["dns"])
+                if not nslookup["attempts"]:
+                    nslookup["attempts"] = [{"server": "system", **result["dns"], "answers": []}]
             return result
+        tcp_ports = (port,) if port is not None else DOMAIN_DEFAULT_PORTS if is_domain else ()
         for address in addresses:
             if should_continue is not None and not should_continue():
                 raise AbandonedProbe()
@@ -609,13 +709,13 @@ class ProbeEngine:
                                "rule": str(network), "source": "request.excludedCidrs"}
             if skipped:
                 result["ping"].append({"address": address, "elapsedMs": 0, **skipped})
-                if port is not None:
-                    result["tcp"].append({"address": address, "port": port, "elapsedMs": 0, **skipped})
+                for tcp_port in tcp_ports:
+                    result["tcp"].append({"address": address, "port": tcp_port, "elapsedMs": 0, **skipped})
                 continue
             # Every actual operation receives the already-checked numeric address.
             result["ping"].append(await self._io(lambda address=address: self._ping(address), should_continue))
-            if port is not None:
-                result["tcp"].append(await self._io(lambda address=address: self._tcp(address, port), should_continue))
+            for tcp_port in tcp_ports:
+                result["tcp"].append(await self._io(lambda address=address, tcp_port=tcp_port: self._tcp(address, tcp_port), should_continue))
         return result
 
 
@@ -697,6 +797,8 @@ def create_app(settings=None, policy=None, engine=None, logger=None):
                 "cdnCidrs": len(policy.cidrs), "cdnDomainSuffixes": len(policy.domains),
                 "publicOnly": True, "ipv4Only": True, "cdnExcluded": True,
                 "safetyExclusions": True, "excludedCidrsSupported": True,
+                "domainNslookup": True, "domainPing": True,
+                "domainDnsFallback": True, "domainDefaultPorts": list(DOMAIN_DEFAULT_PORTS),
                 "dnsExcluded": True, "excludedDnsAddresses": len(policy.dns_addresses)}
 
     @app.post("/v1/probes", status_code=202, dependencies=[Depends(authenticate)])
