@@ -168,7 +168,11 @@ class CustomDnsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_http_health_advertises_capability_and_old_and_custom_requests_both_work(self):
         self.engine.allow_non_windows = True
-        app = service.create_app(settings=self.engine.settings, policy=self.engine.policy, engine=self.engine)
+        # ASGITransport reuses this already-started fixture without lifespan.
+        # Reuse its logger so no unowned rotating file handle remains open when
+        # TemporaryDirectory removes the logs directory on Windows.
+        app = service.create_app(settings=self.engine.settings, policy=self.engine.policy, engine=self.engine,
+                                 logger=self.engine.logger)
         transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 12345))
         async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1",
                                      headers={"Authorization": "Bearer " + self.engine.settings.token}) as client:
