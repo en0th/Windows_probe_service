@@ -65,6 +65,7 @@ function Test-BundledExecutable {
     $selfTest = ($selfTestLines -join "`n") | ConvertFrom-Json
     if ($selfTest.status -ne 'ok' -or $selfTest.frozen -ne $true -or $selfTest.bundleLayout -ne $Layout) { throw 'The EXE did not confirm bundled runtime/resources in its self-test.' }
     if ($selfTest.httpStack -ne 'starlette' -or $selfTest.validationImplementation -ne 'python' -or $selfTest.pydanticCoreBundled -isnot [bool] -or $selfTest.pydanticCoreBundled -ne $false) { throw 'The EXE did not confirm the Starlette/Python implementation without pydantic_core.' }
+    if ($selfTest.customDnsServers -ne $true -or ($selfTest.dnsServers -join ',') -ne '8.8.8.8,223.5.5.5') { throw 'The EXE self-test did not confirm configurable DNS support.' }
 
     if ($Layout -eq 'onedir') {
         $expectedRuntimeRoot = [System.IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $exePath) '_internal'))
@@ -75,7 +76,7 @@ function Test-BundledExecutable {
         Write-Host ('Portable PythonRuntime signature status: ' + $runtimeSignature.Status)
     }
 
-    # Smoke the actual bundled ASGI server on loopback, without submitting targets.
+    # Smoke the actual bundled ASGI server on loopback without target network I/O.
     $smokeDir = Join-Path ([System.IO.Path]::GetTempPath()) ('soar exe smoke ' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $smokeDir | Out-Null
     $process = $null
@@ -108,8 +109,23 @@ function Test-BundledExecutable {
         }
         if ($null -eq $health -or $health.status -ne 'ok' -or $health.platform -ne 'windows' -or $health.ipv4Only -ne $true) { throw 'The bundled Windows IPv4 service did not become healthy.' }
         if ($health.domainNslookup -ne $true -or $health.domainPing -ne $true -or $health.domainDnsFallback -ne $true -or ($health.domainDefaultPorts -join ',') -ne '80,443') { throw 'The bundled service is missing domain DNS fallback or default TCP ports.' }
+        if ($health.customDnsServers -ne $true -or ($health.dnsServers -join ',') -ne '8.8.8.8,223.5.5.5') { throw 'The bundled service is missing configurable DNS capability.' }
         $auth = Invoke-RestMethod -Uri ($smokeUrl + '/v1/auth-check') -Headers @{ Authorization = 'Bearer ' + $smokeConfig.token } -TimeoutSec 3
         if ($auth.status -ne 'ok' -or $auth.apiVersion -ne 1) { throw 'The bundled service failed its authenticated check.' }
+        # Exercise the new frozen API schema using a special address that the
+        # policy must skip. No DNS, Ping or TCP target traffic is permitted here.
+        $probeHeaders = @{ Authorization = 'Bearer ' + $smokeConfig.token }
+        $probeBody = @{ queryId = 'ci-dns-schema'; targets = @(@{ id = 'filtered'; host = '0.0.0.0'; port = $null }); dnsServers = @('192.168.1.53') } | ConvertTo-Json -Depth 6
+        $probeJob = Invoke-RestMethod -Uri ($smokeUrl + '/v1/probes') -Method Post -ContentType 'application/json' -Body $probeBody -Headers $probeHeaders -TimeoutSec 3
+        if ($probeJob.queryId -ne 'ci-dns-schema' -or $probeJob.total -ne 1 -or [string]::IsNullOrWhiteSpace($probeJob.jobId)) { throw 'The bundled service did not accept a valid custom DNS request.' }
+        $probeResult = $null
+        for ($attempt = 0; $attempt -lt 30; $attempt++) {
+            $probeResult = Invoke-RestMethod -Uri ($smokeUrl + '/v1/probes/' + $probeJob.jobId + '?after=0') -Headers $probeHeaders -TimeoutSec 3
+            if ($probeResult.status -eq 'completed') { break }
+            Start-Sleep -Milliseconds 100
+        }
+        if ($probeResult.status -ne 'completed' -or $probeResult.completed -ne 1 -or @($probeResult.results).Count -ne 1 -or $probeResult.results[0].ping[0].status -ne 'skipped_private' -or @($probeResult.results[0].tcp).Count -ne 0) { throw 'The custom DNS schema smoke did not skip its special IPv4 target.' }
+        Write-Host 'Verified custom DNS API: configuration accepted; special IPv4 target skipped without probe I/O.'
     } catch {
         $failure = $_
         $errorFile = Join-Path $smokeDir 'stderr.log'

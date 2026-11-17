@@ -12,6 +12,16 @@ import re
 
 
 MAX_TARGETS = 4000
+MAX_DNS_SERVERS = 8
+DEFAULT_DNS_SERVERS = ("8.8.8.8", "223.5.5.5")
+# Explicit ranges keep validation stable across Python ipaddress database updates.
+# RFC1918 and shared enterprise networks remain valid resolver destinations.
+DNS_SERVER_DENIED_CIDRS = (
+    "0.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "192.0.0.0/24",
+    "192.0.2.0/24", "192.88.99.0/24", "198.18.0.0/15", "198.51.100.0/24",
+    "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4",
+)
+_DNS_SERVER_DENIED = tuple(ipaddress.ip_network(value) for value in DNS_SERVER_DENIED_CIDRS)
 
 
 class ValidationError(ValueError):
@@ -99,6 +109,25 @@ def _exclusions(values, field: str, maximum: int, *, cidrs: bool) -> list[str]:
     return normalized
 
 
+def normalize_dns_servers(values) -> list[str]:
+    values = _list(values, "dnsServers", MAX_DNS_SERVERS)
+    normalized, seen = [], set()
+    for index, value in enumerate(values):
+        if not isinstance(value, str):
+            raise ValidationError("DNS server must be a canonical IPv4 string", loc=("dnsServers", index))
+        try:
+            address = ipaddress.ip_address(value.strip())
+        except ValueError as exc:
+            raise ValidationError("DNS server must be a canonical IPv4 string", loc=("dnsServers", index)) from exc
+        if address.version != 4 or any(address in network for network in _DNS_SERVER_DENIED):
+            raise ValidationError("DNS server must be a usable unicast IPv4 address", loc=("dnsServers", index))
+        canonical = str(address)
+        if canonical not in seen:
+            normalized.append(canonical)
+            seen.add(canonical)
+    return normalized
+
+
 @dataclass(frozen=True, init=False)
 class ProbeTarget:
     id: str
@@ -139,9 +168,10 @@ class ProbeBatch:
     targets: list[ProbeTarget]
     excludedHosts: list[str]
     excludedCidrs: list[str]
+    dnsServers: list[str]
 
     def __init__(self, **data):
-        _check_fields(data, {"queryId", "targets", "excludedHosts", "excludedCidrs"}, ("queryId", "targets"))
+        _check_fields(data, {"queryId", "targets", "excludedHosts", "excludedCidrs", "dnsServers"}, ("queryId", "targets"))
         query_id = _string(data["queryId"], "queryId", 160)
         raw_targets = _list(data["targets"], "targets", MAX_TARGETS, minimum=1)
         targets, ids = [], set()
@@ -156,10 +186,12 @@ class ProbeBatch:
             targets.append(target)
         excluded_hosts = _exclusions(data.get("excludedHosts", []), "excludedHosts", 200, cidrs=False)
         excluded_cidrs = _exclusions(data.get("excludedCidrs", []), "excludedCidrs", 2048, cidrs=True)
+        dns_servers = normalize_dns_servers(data.get("dnsServers", list(DEFAULT_DNS_SERVERS)))
         object.__setattr__(self, "queryId", query_id)
         object.__setattr__(self, "targets", targets)
         object.__setattr__(self, "excludedHosts", excluded_hosts)
         object.__setattr__(self, "excludedCidrs", excluded_cidrs)
+        object.__setattr__(self, "dnsServers", dns_servers)
 
     @classmethod
     def model_validate(cls, value) -> ProbeBatch:
@@ -167,9 +199,10 @@ class ProbeBatch:
             value = value.model_dump()
         if not isinstance(value, dict):
             raise ValidationError("Input should be a valid object", error_type="model_type")
-        _check_fields(value, {"queryId", "targets", "excludedHosts", "excludedCidrs"}, ("queryId", "targets"))
+        _check_fields(value, {"queryId", "targets", "excludedHosts", "excludedCidrs", "dnsServers"}, ("queryId", "targets"))
         return cls(**value)
 
     def model_dump(self) -> dict:
         return {"queryId": self.queryId, "targets": [target.model_dump() for target in self.targets],
-                "excludedHosts": list(self.excludedHosts), "excludedCidrs": list(self.excludedCidrs)}
+                "excludedHosts": list(self.excludedHosts), "excludedCidrs": list(self.excludedCidrs),
+                "dnsServers": list(self.dnsServers)}

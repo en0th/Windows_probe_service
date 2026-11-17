@@ -47,7 +47,7 @@ class DnsEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.engine._ping = AsyncMock(side_effect=lambda ip: {"address": ip, "status": "reachable"})
         self.engine._tcp = AsyncMock(side_effect=lambda ip, port: {"address": ip, "port": port, "status": "open"})
         result = await self.engine.probe(DOMAIN, 443)
-        self.engine._resolve.assert_awaited_once_with(DOMAIN, should_continue=None)
+        self.engine._resolve.assert_awaited_once_with(DOMAIN, should_continue=None, dns_servers=service.DEFAULT_DNS_SERVERS)
         self.assertEqual([call.args for call in self.engine._ping.await_args_list], [(PUBLIC,), (OTHER,)])
         self.assertEqual([call.args for call in self.engine._tcp.await_args_list], [(PUBLIC, 443), (OTHER, 443)])
         lookup = result["nslookup"]
@@ -97,7 +97,7 @@ class DnsEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["nslookup"]["answers"], [PUBLIC])
         self.assertEqual(result["nslookup"]["aliases"], ["a.edge.example.invalid"])
         self.assertEqual(result["skipped"]["status"], "skipped_cdn")
-        self.engine._resolve.assert_awaited_once_with(DOMAIN, should_continue=None)
+        self.engine._resolve.assert_awaited_once_with(DOMAIN, should_continue=None, dns_servers=service.DEFAULT_DNS_SERVERS)
         self.engine._ping.assert_not_called()
         self.engine._tcp.assert_not_called()
 

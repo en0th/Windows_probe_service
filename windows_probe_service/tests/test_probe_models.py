@@ -88,7 +88,8 @@ class TargetValidationTests(unittest.TestCase):
 
 class BatchValidationTests(unittest.TestCase):
     def test_json_round_trip_includes_original_api_defaults(self):
-        payload = {"queryId": "q1", "targets": [{"id": "t1", "host": PUBLIC, "port": None}], "excludedHosts": [], "excludedCidrs": []}
+        payload = {"queryId": "q1", "targets": [{"id": "t1", "host": PUBLIC, "port": None}],
+                   "excludedHosts": [], "excludedCidrs": [], "dnsServers": ["8.8.8.8", "223.5.5.5"]}
         self.assertEqual(batch().model_dump(), payload)
         self.assertEqual(ProbeBatch.model_validate(json.loads(json.dumps(payload))).model_dump(), payload)
 

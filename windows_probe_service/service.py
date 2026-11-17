@@ -35,13 +35,13 @@ from starlette.routing import Route
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from network_policy import NetworkPolicy
-from probe_models import MAX_TARGETS, ProbeBatch, ProbeTarget, ValidationError, normalize_host
+from probe_models import DEFAULT_DNS_SERVERS, MAX_TARGETS, ProbeBatch, ProbeTarget, ValidationError, normalize_host
 import windows_icmp
 
 API_VERSION = 1
-SERVICE_VERSION = "1.3.0"
+SERVICE_VERSION = "1.4.0"
 MAX_DNS_ADDRESSES = 64
-DNS_RESOLVER_SEQUENCE = ("system", "8.8.8.8", "223.5.5.5")
+DNS_RESOLVER_SEQUENCE = ("system", *DEFAULT_DNS_SERVERS)
 DOMAIN_DEFAULT_PORTS = (80, 443)
 MAX_BODY_BYTES = 2 * 1024 * 1024
 def resource_path(name: str) -> Path:
@@ -93,10 +93,15 @@ def run_self_test() -> dict:
         raise RuntimeError("bundled CDN data or license missing")
     if policy.address("0.0.0.0") is None or policy.address("8.8.8.8") is None or policy.address("::1") is None:
         raise RuntimeError("address exclusion self-test failed")
+    validation = ProbeBatch(queryId="offline-self-test", targets=[{"id": "offline", "host": "example.invalid"}],
+                            dnsServers=["10.0.0.53"])
+    if validation.dnsServers != ["10.0.0.53"]:
+        raise RuntimeError("custom DNS validation self-test failed")
     return {"status": "ok", "service": "soar-network-probe", "version": SERVICE_VERSION,
             "apiVersion": API_VERSION, "frozen": frozen, "bundleLayout": bundle_layout,
             "httpStack": "starlette", "validationImplementation": "python",
             "pydanticCoreBundled": False,
+            "customDnsServers": True, "dnsServers": list(DEFAULT_DNS_SERVERS),
             "nativeDependencies": {"pythonRuntime": str(python_runtime)},
             "ipv4Only": True, "cdnRulesVersion": policy.version,
             "cdnCidrs": len(policy.cidrs), "cdnDomainSuffixes": len(policy.domains),
@@ -285,6 +290,7 @@ class Entry:
     port: Optional[int]
     excluded_hosts: tuple = ()
     excluded_cidrs: tuple = ()
+    dns_servers: tuple = DEFAULT_DNS_SERVERS
     watchers: list = field(default_factory=list)
     started: bool = False
 
@@ -383,8 +389,9 @@ class ProbeEngine:
             raise CapacityError("too_many_jobs")
         exclusions = tuple(sorted(batch.excludedHosts))
         excluded_cidrs = tuple(sorted(batch.excludedCidrs))
+        dns_servers = tuple(batch.dnsServers)
         def target_key(target):
-            return (target.host, target.port, exclusions, excluded_cidrs) if exclusions or excluded_cidrs else (target.host, target.port)
+            return (target.host, target.port, exclusions, excluded_cidrs, dns_servers)
         new_keys = {target_key(t) for t in batch.targets} - self.inflight.keys() - self.cache.keys()
         if self.queue.qsize() + len(new_keys) > self.settings.queue_size:
             raise CapacityError("probe_queue_full")
@@ -397,13 +404,14 @@ class ProbeEngine:
                 self._append(job, target, self.cache[key][1], cached=True)
                 continue
             if key not in self.inflight:
-                entry = Entry(key, target.host, target.port, excluded_hosts=exclusions, excluded_cidrs=excluded_cidrs)
+                entry = Entry(key, target.host, target.port, excluded_hosts=exclusions,
+                              excluded_cidrs=excluded_cidrs, dns_servers=dns_servers)
                 self.inflight[key] = entry
                 self.queue.put_nowait(entry)
             self.inflight[key].watchers.append((job.id, target))
         self.log("job_submitted", jobId=job.id, queryId=job.query_id, total=job.total,
                  uniqueTargets=len({(t.host, t.port) for t in batch.targets}),
-                 excludedHosts=list(exclusions), excludedCidrs=list(excluded_cidrs))
+                 excludedHosts=list(exclusions), excludedCidrs=list(excluded_cidrs), dnsServers=list(dns_servers))
         return job
 
     def cancel(self, job_id):
@@ -451,7 +459,8 @@ class ProbeEngine:
                         job.status = "running"
                 try:
                     result = await self.probe(entry.host, entry.port, should_continue=lambda: bool(entry.watchers),
-                                              excluded_hosts=entry.excluded_hosts, excluded_cidrs=entry.excluded_cidrs)
+                                              excluded_hosts=entry.excluded_hosts, excluded_cidrs=entry.excluded_cidrs,
+                                              dns_servers=entry.dns_servers)
                 except AbandonedProbe:
                     continue
                 except Exception as exc:
@@ -492,10 +501,10 @@ class ProbeEngine:
                 raise AbandonedProbe()
             return await operation()
 
-    async def _resolve(self, host, should_continue=None):
+    async def _resolve(self, host, should_continue=None, dns_servers=DEFAULT_DNS_SERVERS):
         attempts = []
         budget = self.settings.timeout_ms / 1000
-        for server in DNS_RESOLVER_SEQUENCE:
+        for server in ("system", *dns_servers):
             if should_continue is not None and not should_continue():
                 raise AbandonedProbe()
             started = None
@@ -566,7 +575,7 @@ class ProbeEngine:
                 except (OSError, asyncio.TimeoutError):
                     pass
 
-    async def probe(self, host, port, should_continue=None, excluded_hosts=(), excluded_cidrs=()):
+    async def probe(self, host, port, should_continue=None, excluded_hosts=(), excluded_cidrs=(), dns_servers=DEFAULT_DNS_SERVERS):
         try:
             literal_address = ipaddress.ip_address(host)
         except ValueError:
@@ -595,7 +604,7 @@ class ProbeEngine:
             if is_domain:
                 if should_continue is not None and not should_continue():
                     raise AbandonedProbe()
-                resolution = await self._resolve(host, should_continue=should_continue)
+                resolution = await self._resolve(host, should_continue=should_continue, dns_servers=dns_servers)
                 addresses, aliases = resolution
                 nslookup["attempts"] = getattr(resolution, "attempts", [{"server": "system", "status": "ok", "answers": addresses[:MAX_DNS_ADDRESSES], "elapsedMs": round((time.monotonic() - started) * 1000)}])
                 nslookup["resolver"] = getattr(resolution, "resolver", "system")
@@ -639,7 +648,9 @@ class ProbeEngine:
         for address in addresses:
             if should_continue is not None and not should_continue():
                 raise AbandonedProbe()
-            skipped = self.policy.address(address)
+            skipped = ({"status": "skipped_dns", "reason": "configured_dns_server",
+                        "rule": address, "source": "request.dnsServers"}
+                       if address in dns_servers else self.policy.address(address))
             if skipped is None and address in excluded_hosts:
                 skipped = {"status": "skipped_custom", "reason": "custom_exclusion",
                            "rule": address, "source": "request.excludedHosts"}
@@ -737,7 +748,8 @@ def create_app(settings=None, policy=None, engine=None, logger=None):
                 "publicOnly": True, "ipv4Only": True, "cdnExcluded": True,
                 "safetyExclusions": True, "excludedCidrsSupported": True,
                 "domainNslookup": True, "domainPing": True,
-                "domainDnsFallback": True, "domainDefaultPorts": list(DOMAIN_DEFAULT_PORTS),
+                "domainDnsFallback": True, "customDnsServers": True, "dnsServers": list(DEFAULT_DNS_SERVERS),
+                "domainDefaultPorts": list(DOMAIN_DEFAULT_PORTS),
                 "dnsExcluded": True, "excludedDnsAddresses": len(policy.dns_addresses)})
 
     def reject_constant(value):

@@ -100,6 +100,8 @@ class FrozenRuntimeTests(unittest.TestCase):
         self.assertEqual(result["httpStack"], "starlette")
         self.assertEqual(result["validationImplementation"], "python")
         self.assertIs(result["pydanticCoreBundled"], False)
+        self.assertIs(result["customDnsServers"], True)
+        self.assertEqual(result["dnsServers"], list(service.DEFAULT_DNS_SERVERS))
         self.assertEqual(set(result["dependencies"]), {"starlette", "uvicorn", "dnspython"})
         self.assertNotIn("token", json.dumps(result).lower())
         self.assertIsInstance(json.loads(json.dumps(result)), dict)
