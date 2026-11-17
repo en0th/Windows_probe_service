@@ -1,10 +1,12 @@
 # SOARProbe Windows IPv4 service
 
-Standalone local FastAPI probe service for the SOAR userscript. Only public IPv4 targets are eligible; private/special addresses, DNS servers, known CDN/WAF networks and custom exclusions are skipped.
+Standalone local FastAPI probe service for the SOAR userscript. Only public IPv4 targets are eligible; private/special addresses, default safety rules, DNS servers, known CDN/WAF networks and custom exclusions are skipped. Explicitly associated TCP ports are checked even when Ping fails.
 
 The Windows release runs without Python or dependency installation. Double-click `SOARProbe.exe`; press C to copy the pairing token, L to open logs, Q to quit. Settings remain in `%LOCALAPPDATA%\SOARProbe`.
 
-Build the verified EXE with [GitHub Actions](https://github.com/en0th/Windows_probe_service/actions/workflows/build-windows-probe.yml), then download the `SOARProbe-Windows-x64` artifact. The workflow runs offline tests, checks PE x64 and frozen resources, and starts the bundled service for loopback health/authentication checks without target probes.
+Download the ready-to-run [Windows release](https://github.com/en0th/Windows_probe_service/releases/latest): `SOARProbe.exe` or the complete `SOARProbe-Windows-x64.zip`. No Python or dependency installation is needed.
+
+Build with [GitHub Actions](https://github.com/en0th/Windows_probe_service/actions/workflows/build-windows-probe.yml); leave `release_tag` blank for an artifact-only build, or enter the matching service version (for example `v1.1.1`) to publish a Release. The workflow runs offline tests, checks PE x64 and frozen resources, and starts the bundled service for loopback health/authentication checks without target probes. Release publishing uses a separate job and publishes only after the complete assets have been uploaded to a draft.
 
 [Chinese installation and build guide](windows_probe_service/README.md)
 

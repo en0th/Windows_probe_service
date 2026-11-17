@@ -1,12 +1,14 @@
 # SOAR Windows 本地连通性服务
 
-本服务配合本目录上一级的 `SOAR 批量封堵调度.txt` 油猴脚本使用。在原站普通或高级检索查询成功后，脚本提取当前页的公网 IPv4、域名和明确对应的 TCP 端口，在原站已有 IPv4 文本上加绿色（连通）或红色（无法连通）底色，不新增列。悬停查看检测原因；未检测或被排除的目标保持原样。网络探测不参与告警处置判断。
+本服务配合 v20.0 或更新的 `SOAR 批量封堵调度.txt` 油猴脚本使用。在原站普通或高级检索查询成功后，脚本提取当前页的公网 IPv4、域名和明确对应的 TCP 端口，在原站已有 IPv4 文本上加深绿色（连通）或深红色（本次未连通）胶囊标记，左侧圆形图标区分状态，白色文本四周至少 5px 内边距，不新增列。悬停查看 Ping 和端口检测原因；未检测或被排除的目标保持原样。网络探测不参与告警处置判断。
 
 **仅探测公网 IPv4，排除已知 CDN/WAF、DNS 服务器、内网和特殊地址。** IPv6、`0.0.0.0`、回环、链路本地、组播、保留和特殊用途地址直接跳过。域名只查询 A 记录并检查 CNAME，服务端逐个检查解析出的 IPv4，随后只向已检查的数字 IPv4 发起检测；不会再次解析域名后直接连接。
 
 ## 免安装 EXE 使用
 
 发布版为 **`SOARProbe.exe`**，已包含 Python、FastAPI、依赖和默认 CDN 规则。运行电脑无须安装 Python、运行 `Install.cmd` 或安装 Telnet 客户端。
+
+在 [GitHub Releases](https://github.com/en0th/Windows_probe_service/releases/latest) 下载 EXE，或下载包含 EXE、本文档、许可证和校验文件的 `SOARProbe-Windows-x64.zip`。
 
 1. 解压 Windows x64 发布包，将 `SOARProbe.exe` 放到固定目录，双击启动并保持窗口打开。
 2. 窗口显示本地地址后，按 **C** 复制配对令牌。在原站表格上方“配置”中填写地址和令牌，开启自动探测。
@@ -40,15 +42,15 @@
 
 1. 将构建包中的 `windows_probe_service` 文件夹和 `.github` 文件夹上传到自己的仓库，保持目录层级。
 2. 在仓库 **Actions → Build Windows probe EXE → Run workflow** 手动运行。
-3. 构建成功后下载 `SOARProbe-Windows-x64` artifact，解压获得 EXE、发布 ZIP 和校验文件。
+3. 构建成功后下载 `SOARProbe-Windows-x64` artifact，解压获得 EXE、发布 ZIP 和校验文件。需要发布 GitHub Release 时，在 `release_tag` 填写与服务版本一致的标签（例如 `v1.1.1`）；留空只构建。
 
-上传范围仅需构建包内容，不要上传本机配置、令牌或诊断日志。工作流仅手动触发，不会自动发布 release。
+上传范围仅需构建包内容，不要上传本机配置、令牌或诊断日志。工作流仅手动触发；只有显式填写 `release_tag` 时，独立发布任务才获得写权限，在 Windows 构建、自检和校验成功后上传 Release 附件。用于发布的仓库还需包含 `RELEASE_NOTES.md`。
 
 Windows EXE 必须在 Windows 上构建，不能将 macOS 产物转换或改名为 Windows EXE。请使用 Windows 构建脚本通过检查后生成的发布 ZIP。依据见 [PyInstaller 官方要求](https://github.com/pyinstaller/pyinstaller#requirements)。
 
 ## 直接运行 Python 源码
 
-先更新油猴脚本：将安装包内 `SOAR-19.0.user.js`（或本目录上一级的 `SOAR 批量封堵调度.txt`）完整内容替换到原有脚本编辑器并保存，然后刷新原站页面。若通过导入新增了脚本，请停用旧副本，避免同时运行多个版本。
+先更新油猴脚本：将安装包内 `SOAR-20.0.user.js`（或本目录上一级的 `SOAR 批量封堵调度.txt`）完整内容替换到原有脚本编辑器并保存，然后刷新原站页面。若通过导入新增了脚本，请停用旧副本，避免同时运行多个版本。
 
 1. 安装 Windows 64 位 Python 3.11 或更新版本，推荐 Python 3.11–3.13。安装程序中启用 Python launcher（`py`）。
 2. 将整个 `windows_probe_service` 文件夹复制到 Windows 的固定目录，例如 `C:\SOAR\windows_probe_service`，保持所有文件一起复制，包含 `cdn_rules.json`。
@@ -94,6 +96,10 @@ Windows EXE 必须在 Windows 上构建，不能将 macOS 产物转换或改名�
 日志按 4 MiB 轮转，保留当前文件和 5 个历史文件；任务结果保存在内存，最多保留 32 个任务，已完成任务约一小时后可被清理。配置不会随日志和任务清理。相同目标与相同排除配置会合并并短时复用缓存，记录 `cached` 字段及完成时间。页面日志保存当前会话最近 1500 条诊断，导出时还包含当前完整结果；需长期归档时请导出，服务端另有持久日志。
 
 ## IPv4、公网、DNS 和 CDN 排除
+
+默认安全过滤清单始终生效，包含 `210.39.0.0/20`、`202.127.241.128/25`、`172.0.0.0/8`、`116.13.96.0/20`、内网和特殊地址，以及默认清单中的单个 IPv4。脚本还会读取“设置 → 安全过滤清单”当前保存的 IPv4 规则，和默认规则取并集后随任务下发。服务端内置默认清单；旧 `config.json` 中 `excludedCidrs` 为空也不会绕过默认保护。IPv6 规则不下发，因为整个探测仅接受 IPv4。
+
+直接 IP 在前端提取时排除；域名解析出的每个 IPv4 在服务端再次检查。修改并保存清单后，当前页会取消旧结果并按新清单重新探测。排除规则纳入任务去重和缓存标识，命中清单的 IP 不会沿用先前的绿色或红色标记。
 
 服务端的排除判断具有最终决定权。即使脚本误传了私网地址，或域名解析出私网地址，服务也不会向它发起 ICMP/TCP 检测。IPv6 不探测，也不会为域名发起 AAAA 查询。
 
@@ -142,9 +148,10 @@ Windows EXE 必须在 Windows 上构建，不能将 macOS 产物转换或改名�
 | `skipped_cdn` | 命中已知 CDN/WAF 网段、域名或 CNAME，没有发起探测 |
 | `skipped_dns` | 常见公共 DNS、系统 DNS、DNS 域名或 DNS 端口，没有发起探测 |
 | `skipped_custom` | 命中页面额外排除 IPv4 或服务排除网段，没有发起探测 |
+| `skipped_safety` | 命中内置默认安全过滤清单，没有发起探测 |
 | `skipped_ipv6` | 仅支持 IPv4，没有发起探测 |
 
-Windows Ping 使用原生 IPv4 `IcmpSendEcho`，不解析中英文 `ping.exe` 输出，无须开启 Telnet 客户端，也不使用原始套接字。TCP 使用 asyncio 建立连接并立即关闭，不发送登录或业务数据。源端口通常是临时客户端端口，因此脚本默认不检测源端口；没有明确端口的域名只执行 DNS/ICMP。显式 UDP 端点不会执行 TCP 检测。
+Windows Ping 使用原生 IPv4 `IcmpSendEcho`，不解析中英文 `ping.exe` 输出，无须开启 Telnet 客户端，也不使用原始套接字。TCP 使用 asyncio 建立连接并立即关闭，等同于使用 Telnet 验证端口是否能建立连接，不发送登录或业务数据。明确对应的目的端口和源端口默认都执行 TCP 检测；Ping 超时、不可达或出错也会继续连接端口。升级至脚本 v20.0 时会将旧版默认关闭的源端口设置迁移为开启；此后在“更多设置”明确关闭后会长期保留。没有明确关联的端口时只执行 DNS/ICMP，不猜测端口，不进行端口扫描。显式 UDP 和 DNS 端口 53/853 会跳过 TCP。
 
 最多接受每任务 4000 个目标、4 个同时活动任务、8192 个排队的唯一目标。一次 DNS 返回超过 64 个地址或 A/CNAME 解析证据不完整时，该目标停止探测并记录错误，避免凭不完整的 CDN 判定发起连接。重复目标跨行共享结果，翻页/重新查询后旧结果不应覆盖新表格。
 
@@ -164,7 +171,7 @@ Windows Ping 使用原生 IPv4 `IcmpSendEcho`，不解析中英文 `ping.exe` �
 除 `GET /health` 外，都要求 `Authorization: Bearer <token>`，仅接受本机来源和本机 Host。
 
 - `GET /v1/auth-check`：认证检查，不创建任务、不执行 DNS/ICMP/TCP。
-- `POST /v1/probes`：提交 `{"queryId":"q1","excludedHosts":["93.184.216.34"],"targets":[{"id":"t1","host":"example.com","port":443}]}`，返回 HTTP 202 和 `jobId/queryId/total/cursor`。`port` 可省略或为 `null`；`excludedHosts` 可省略，最多 200 个规范 IPv4。
+- `POST /v1/probes`：提交 `{"queryId":"q1","excludedHosts":["93.184.216.34"],"excludedCidrs":["210.39.0.0/20"],"targets":[{"id":"t1","host":"example.com","port":443}]}`，返回 HTTP 202 和 `jobId/queryId/total/cursor`。`port` 可省略或为 `null`；`excludedHosts` 可省略，最多 200 个规范 IPv4；`excludedCidrs` 可省略，最多 2048 个规范 IPv4 地址或网络地址 CIDR。所有排除配置参与缓存隔离，并检查域名解析后的地址。
 - `GET /v1/probes/{jobId}?after=0`：返回任务状态、`total/completed/cursor` 和该游标之后完成的 `results`。使用上次返回的 `cursor` 继续读取；结果完成顺序不保证与提交顺序一致，使用目标 `id` 回填。
 - `DELETE /v1/probes/{jobId}`：取消该任务后续结果。尚未开始且无人订阅的共享目标会跳过；已发出的单次 ICMP/TCP 在有限超时内结束，其他任务订阅的共享目标继续执行。
 
@@ -179,4 +186,4 @@ Windows Ping 使用原生 IPv4 `IcmpSendEcho`，不解析中英文 `ping.exe` �
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-测试通过模拟 DNS、ICMP、TCP 和本地 HTTP ASGI 请求检查策略、队列、去重、取消和协议，不向真实目标发起网络探测。Windows 原生 ICMP 调用的结构与参数有离线模拟验证；实际 Windows 网络和浏览器联调需在部署机器验证。安装脚本未在此 macOS 开发环境执行。
+测试通过模拟 DNS、ICMP、TCP 和本地 HTTP ASGI 请求检查策略、队列、去重、取消和协议，不向真实目标发起网络探测。GitHub Actions 在 Windows 上执行测试，并实际启动生成的 EXE 验证冻结资源、健康接口和令牌认证。实际目标的网络可达性取决于部署机器；详细证据记录在日志中。

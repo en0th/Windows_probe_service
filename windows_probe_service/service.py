@@ -36,7 +36,7 @@ from network_policy import NetworkPolicy
 import windows_icmp
 
 API_VERSION = 1
-SERVICE_VERSION = "1.1.0"
+SERVICE_VERSION = "1.1.1"
 MAX_TARGETS = 4000
 MAX_DNS_ADDRESSES = 64
 MAX_BODY_BYTES = 2 * 1024 * 1024
@@ -203,6 +203,23 @@ class ProbeBatch(BaseModel):
     queryId: str = Field(min_length=1, max_length=160)
     targets: list[ProbeTarget] = Field(min_length=1, max_length=MAX_TARGETS)
     excludedHosts: list[str] = Field(default_factory=list, max_length=200)
+    excludedCidrs: list[str] = Field(default_factory=list, max_length=2048)
+
+    @field_validator("excludedCidrs")
+    @classmethod
+    def exclusion_cidrs_valid(cls, values):
+        normalized = []
+        for value in values:
+            try:
+                network = ipaddress.ip_network(value.strip(), strict=True)
+            except ValueError as exc:
+                raise ValueError("excludedCidrs must contain canonical IPv4 addresses or CIDRs") from exc
+            if network.version != 4:
+                raise ValueError("excludedCidrs must contain IPv4 addresses or CIDRs")
+            canonical = str(network)
+            if canonical not in normalized:
+                normalized.append(canonical)
+        return normalized
 
     @field_validator("excludedHosts")
     @classmethod
@@ -323,6 +340,7 @@ class Entry:
     host: str
     port: Optional[int]
     excluded_hosts: tuple = ()
+    excluded_cidrs: tuple = ()
     watchers: list = field(default_factory=list)
     started: bool = False
 
@@ -395,8 +413,9 @@ class ProbeEngine:
         if len(self.jobs) >= self.settings.max_jobs or sum(j.status in {"queued", "running"} for j in self.jobs.values()) >= self.settings.max_active_jobs:
             raise CapacityError("too_many_jobs")
         exclusions = tuple(sorted(batch.excludedHosts))
+        excluded_cidrs = tuple(sorted(batch.excludedCidrs))
         def target_key(target):
-            return (target.host, target.port, exclusions) if exclusions else (target.host, target.port)
+            return (target.host, target.port, exclusions, excluded_cidrs) if exclusions or excluded_cidrs else (target.host, target.port)
         new_keys = {target_key(t) for t in batch.targets} - self.inflight.keys() - self.cache.keys()
         if self.queue.qsize() + len(new_keys) > self.settings.queue_size:
             raise CapacityError("probe_queue_full")
@@ -409,13 +428,13 @@ class ProbeEngine:
                 self._append(job, target, self.cache[key][1], cached=True)
                 continue
             if key not in self.inflight:
-                entry = Entry(key, target.host, target.port, excluded_hosts=exclusions)
+                entry = Entry(key, target.host, target.port, excluded_hosts=exclusions, excluded_cidrs=excluded_cidrs)
                 self.inflight[key] = entry
                 self.queue.put_nowait(entry)
             self.inflight[key].watchers.append((job.id, target))
         self.log("job_submitted", jobId=job.id, queryId=job.query_id, total=job.total,
                  uniqueTargets=len({(t.host, t.port) for t in batch.targets}),
-                 excludedHosts=list(exclusions))
+                 excludedHosts=list(exclusions), excludedCidrs=list(excluded_cidrs))
         return job
 
     def cancel(self, job_id):
@@ -463,7 +482,7 @@ class ProbeEngine:
                         job.status = "running"
                 try:
                     result = await self.probe(entry.host, entry.port, should_continue=lambda: bool(entry.watchers),
-                                              excluded_hosts=entry.excluded_hosts)
+                                              excluded_hosts=entry.excluded_hosts, excluded_cidrs=entry.excluded_cidrs)
                 except AbandonedProbe:
                     continue
                 except Exception as exc:
@@ -541,8 +560,9 @@ class ProbeEngine:
                 except (OSError, asyncio.TimeoutError):
                     pass
 
-    async def probe(self, host, port, should_continue=None, excluded_hosts=()):
+    async def probe(self, host, port, should_continue=None, excluded_hosts=(), excluded_cidrs=()):
         result = {"resolved": [], "dns": {"status": "ok", "elapsedMs": 0}, "ping": [], "tcp": []}
+        request_networks = tuple(ipaddress.ip_network(value, strict=True) for value in excluded_cidrs)
         if port in {53, 853}:
             skip = {"status": "skipped_dns", "reason": "dns_service_port", "rule": str(port), "source": "built_in_dns_policy"}
             return {**result, "dns": {"elapsedMs": 0, **skip}, "skipped": skip}
@@ -581,6 +601,12 @@ class ProbeEngine:
             if skipped is None and address in excluded_hosts:
                 skipped = {"status": "skipped_custom", "reason": "custom_exclusion",
                            "rule": address, "source": "request.excludedHosts"}
+            if skipped is None:
+                ip = ipaddress.ip_address(address)
+                network = next((network for network in request_networks if ip in network), None)
+                if network is not None:
+                    skipped = {"status": "skipped_custom", "reason": "custom_exclusion",
+                               "rule": str(network), "source": "request.excludedCidrs"}
             if skipped:
                 result["ping"].append({"address": address, "elapsedMs": 0, **skipped})
                 if port is not None:
@@ -670,6 +696,7 @@ def create_app(settings=None, policy=None, engine=None, logger=None):
                 "cdnRulesVersion": policy.version, "cdnRulesUpdatedAt": policy.updated_at,
                 "cdnCidrs": len(policy.cidrs), "cdnDomainSuffixes": len(policy.domains),
                 "publicOnly": True, "ipv4Only": True, "cdnExcluded": True,
+                "safetyExclusions": True, "excludedCidrsSupported": True,
                 "dnsExcluded": True, "excludedDnsAddresses": len(policy.dns_addresses)}
 
     @app.post("/v1/probes", status_code=202, dependencies=[Depends(authenticate)])

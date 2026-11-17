@@ -13,6 +13,14 @@ SPECIAL_V4 = tuple(ipaddress.ip_network(value) for value in (
 SPECIAL_V6 = tuple(ipaddress.ip_network(value) for value in (
     "2001::/23", "2001:db8::/32", "2002::/16", "3fff::/20", "2620:4f:8000::/48"))
 GLOBAL_V6 = ipaddress.ip_network("2000::/3")
+# These are the userscript's default safety-filter entries, rather than only
+# RFC-private ranges. Keep the service-side protection on every installation,
+# including upgrades whose persisted config has no explicit exclusions.
+DEFAULT_SAFETY_CIDRS = tuple(ipaddress.ip_network(value) for value in (
+    "210.39.0.0/20", "202.127.241.128/25", "172.0.0.0/8", "192.168.0.0/16",
+    "116.13.96.0/20", "10.0.0.0/8", "127.0.0.1", "0.0.0.0",
+    "116.76.255.38", "202.96.134.133", "114.114.114.114", "114.114.115.115",
+    "202.96.128.86", "210.22.70.3", "211.137.191.26", "211.137.96.205"))
 DNS_ADDRESSES = {
     "8.8.8.8", "8.8.4.4", "2001:4860:4860::8888", "2001:4860:4860::8844",
     "1.1.1.1", "1.0.0.1", "2606:4700:4700::1111", "2606:4700:4700::1001",
@@ -119,6 +127,10 @@ class NetworkPolicy:
         if str(ip) in self.dns_addresses:
             return {"status": "skipped_dns", "reason": "known_public_dns_resolver",
                     "rule": str(ip), "source": self.dns_addresses[str(ip)]}
+        for network in DEFAULT_SAFETY_CIDRS:
+            if ip in network:
+                return {"status": "skipped_safety", "reason": "default_safety_exclusion",
+                        "rule": str(network), "source": "built_in_safety_policy"}
         for network in self.excluded_cidrs:
             if ip.version == network.version and ip in network:
                 return {"status": "skipped_custom", "reason": "custom_exclusion",

@@ -22,7 +22,7 @@ SERVICE_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SERVICE_DIR))
 import service
 import windows_icmp
-from network_policy import NetworkPolicy
+from network_policy import NetworkPolicy, DEFAULT_SAFETY_CIDRS
 import update_cdn_rules
 
 PUBLIC = "93.184.216.34"
@@ -73,6 +73,30 @@ class PolicyAndConfigTests(unittest.TestCase):
             self.assertEqual(self.policy.address(address)["status"], "skipped_dns")
         self.policy.add_system_dns([PUBLIC])
         self.assertEqual(self.policy.address(PUBLIC)["source"], "system_dns_configuration")
+
+    def test_default_safety_filter_is_immutable_and_covers_all_entries(self):
+        self.assertIsInstance(DEFAULT_SAFETY_CIDRS, tuple)
+        for network in DEFAULT_SAFETY_CIDRS:
+            for address in [str(network.network_address), str(network.broadcast_address)]:
+                with self.subTest(address=address):
+                    self.assertTrue(self.policy.address(address)["status"].startswith("skipped_"))
+        for address in ["210.39.0.1", "210.39.15.255", "116.13.96.1", "116.13.111.255",
+                        "202.127.241.128", "202.127.241.255", "172.1.1.1", "116.76.255.38"]:
+            with self.subTest(address=address):
+                result = self.policy.address(address)
+                self.assertEqual(result["status"], "skipped_safety")
+                self.assertEqual(result["source"], "built_in_safety_policy")
+        for address in ["210.39.16.0", "116.13.112.0", "202.127.241.127"]:
+            self.assertIsNone(self.policy.address(address))
+
+    def test_request_safety_cidrs_validated_and_normalized(self):
+        for excluded in [["::1"], ["2001:db8::/32"], ["93.184.216.1/24"], ["invalid"], [True]]:
+            with self.subTest(excluded=excluded), self.assertRaises(ValidationError):
+                batch(excludedCidrs=excluded)
+        normalized = batch(excludedCidrs=[PUBLIC, PUBLIC + "/32", "93.184.216.0/24"])
+        self.assertEqual(normalized.excludedCidrs, [PUBLIC + "/32", "93.184.216.0/24"])
+        with self.assertRaises(ValidationError):
+            batch(excludedCidrs=[f"93.184.{index // 256}.{index % 256}/32" for index in range(2049)])
 
     def test_config_survives_reinstall_and_bad_values_fail(self):
         first = service.load_settings(Path(self.folder.name) / "config")
@@ -165,6 +189,42 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.engine._ping.assert_awaited_once_with(OTHER)
         self.engine._tcp.assert_awaited_once_with(OTHER, 443)
 
+    async def test_default_safety_literal_address_has_no_io(self):
+        for network in DEFAULT_SAFETY_CIDRS:
+            await self.engine.probe(str(network.network_address), 443)
+        self.engine._resolve.assert_not_called()
+        self.engine._ping.assert_not_called()
+        self.engine._tcp.assert_not_called()
+
+    async def test_default_safety_filter_checked_after_dns(self):
+        protected = ["210.39.0.1", "116.13.96.1", "202.127.241.128", "172.1.1.1", "116.76.255.38"]
+        self.engine._resolve = AsyncMock(return_value=(protected, []))
+        result = await self.engine.probe("origin.example.invalid", 443)
+        self.assertEqual([item["status"] for item in result["ping"]], ["skipped_safety"] * len(protected))
+        self.assertEqual([item["status"] for item in result["tcp"]], ["skipped_safety"] * len(protected))
+        self.engine._ping.assert_not_called()
+        self.engine._tcp.assert_not_called()
+
+    async def test_request_cidrs_checked_after_dns_before_ping_and_tcp(self):
+        self.engine._resolve = AsyncMock(return_value=([PUBLIC, OTHER], []))
+        self.engine._ping = AsyncMock(return_value={"address": OTHER, "status": "reachable"})
+        self.engine._tcp = AsyncMock(return_value={"address": OTHER, "port": 443, "status": "open"})
+        result = await self.engine.probe("origin.example.invalid", 443, excluded_cidrs=("93.184.216.0/24",))
+        self.assertEqual(result["ping"][0]["status"], "skipped_custom")
+        self.assertEqual(result["tcp"][0]["source"], "request.excludedCidrs")
+        self.assertEqual(result["tcp"][0]["rule"], "93.184.216.0/24")
+        self.engine._ping.assert_awaited_once_with(OTHER)
+        self.engine._tcp.assert_awaited_once_with(OTHER, 443)
+
+    async def test_known_port_tcp_attempted_even_when_ping_has_no_response(self):
+        for status in ["unreachable", "timeout", "error"]:
+            with self.subTest(status=status):
+                self.engine._ping = AsyncMock(return_value={"address": PUBLIC, "status": status})
+                self.engine._tcp = AsyncMock(return_value={"address": PUBLIC, "port": 443, "status": "open"})
+                result = await self.engine.probe(PUBLIC, 443)
+                self.engine._tcp.assert_awaited_once_with(PUBLIC, 443)
+                self.assertEqual(result["tcp"][0]["status"], "open")
+
     async def test_dns_limit_and_failure_do_not_probe(self):
         self.engine._resolve = AsyncMock(return_value=([PUBLIC] * 65, []))
         result = await self.engine.probe("origin.example.invalid", 443)
@@ -208,6 +268,22 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(self.engine.queue.join(), 1)
         self.assertEqual(self.engine.probe.await_count, 2)
         self.engine.submit(batch(host="origin.example.invalid", excludedHosts=[]))
+        await asyncio.wait_for(self.engine.queue.join(), 1)
+        self.assertEqual(self.engine.probe.await_count, 3)
+        self.assertEqual(self.engine.snapshot(first.id)["status"], "completed")
+        self.assertEqual(self.engine.snapshot(second.id)["status"], "completed")
+
+    async def test_request_cidrs_isolate_cached_and_inflight_results(self):
+        self.engine.probe = AsyncMock(return_value={"resolved": [PUBLIC], "dns": {"status": "ok"}, "ping": [], "tcp": []})
+        first = self.engine.submit(batch(host="origin.example.invalid", excludedCidrs=[PUBLIC]))
+        second = self.engine.submit(batch(host="origin.example.invalid", excludedCidrs=["93.184.216.0/24"]))
+        self.assertEqual(len(self.engine.inflight), 2)
+        await self.engine.start()
+        await asyncio.wait_for(self.engine.queue.join(), 1)
+        self.assertEqual(self.engine.probe.await_count, 2)
+        self.engine.submit(batch(host="origin.example.invalid", excludedCidrs=[PUBLIC + "/32"]))
+        self.assertEqual(self.engine.probe.await_count, 2)
+        self.engine.submit(batch(host="origin.example.invalid", excludedCidrs=[]))
         await asyncio.wait_for(self.engine.queue.join(), 1)
         self.assertEqual(self.engine.probe.await_count, 3)
         self.assertEqual(self.engine.snapshot(first.id)["status"], "completed")
@@ -263,6 +339,8 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
             health = await client.get("/health")
             self.assertEqual(health.status_code, 200)
             self.assertTrue(health.json()["ipv4Only"])
+            self.assertTrue(health.json()["safetyExclusions"])
+            self.assertTrue(health.json()["excludedCidrsSupported"])
             self.assertNotIn(TOKEN, health.text)
             self.assertEqual((await client.get("/v1/auth-check")).status_code, 401)
             good = await client.get("/v1/auth-check", headers={"Authorization": "Bearer " + TOKEN})
@@ -297,7 +375,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1", headers=headers) as client:
             unauthorized = await client.post("/v1/probes", headers={"Authorization": "Bearer wrong"}, json=batch().model_dump())
             self.assertEqual(unauthorized.status_code, 401)
-            submitted = await client.post("/v1/probes", json=batch(host="origin.example.invalid", excludedHosts=[OTHER]).model_dump())
+            submitted = await client.post("/v1/probes", json=batch(host="origin.example.invalid", excludedHosts=[OTHER], excludedCidrs=["93.184.216.0/24"]).model_dump())
             self.assertEqual(submitted.status_code, 202)
             job_id = submitted.json()["jobId"]
             await self.engine.start()
@@ -314,6 +392,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(cancelled.status_code, 200)
             self.assertEqual(cancelled.json()["status"], "cancelled")
         self.assertEqual(self.engine.probe.await_args.kwargs["excluded_hosts"], (OTHER,))
+        self.assertEqual(self.engine.probe.await_args.kwargs["excluded_cidrs"], ("93.184.216.0/24",))
 
     async def test_log_does_not_echo_token_used_as_query_id(self):
         stream = io.StringIO()
