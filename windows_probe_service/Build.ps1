@@ -8,8 +8,8 @@ if ($env:OS -ne 'Windows_NT') {
 $pythonCheck = "import sys, sysconfig; assert sys.version_info >= (3,11) and sys.maxsize > 2**32 and sysconfig.get_platform() == 'win-amd64', 'A 64-bit Windows x64 Python 3.11+ is required'"
 function Find-BuildPython {
     foreach ($candidate in @(
-        [pscustomobject]@{ Program = 'py'; Arguments = @('-3') },
-        [pscustomobject]@{ Program = 'python'; Arguments = @() }
+        [pscustomobject]@{ Program = 'python'; Arguments = @() },
+        [pscustomobject]@{ Program = 'py'; Arguments = @('-3') }
     )) {
         if (-not (Get-Command $candidate.Program -ErrorAction SilentlyContinue)) { continue }
         try {
