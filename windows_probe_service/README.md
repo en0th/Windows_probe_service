@@ -1,12 +1,12 @@
 # SOAR Windows 本地连通性服务
 
-本服务 v1.2.1 配合 v21.0 或更新的 `SOAR 批量封堵调度.txt` 油猴脚本使用。在原站普通或高级检索查询成功后，脚本提取当前页的公网 IPv4、域名和对应端口，将检测结果直接显示在已有表格中。悬停可查看 DNS、Ping 和端口检测详情；未检测或被排除的目标保持原样。网络探测不参与告警处置判断。
+本服务 v1.3.0 配合 v21.0 或更新的 `SOAR 批量封堵调度.txt` 油猴脚本使用，兼容当前脚本 v23.0。在原站普通或高级检索查询成功后，脚本提取当前页的公网 IPv4、域名和对应端口，将检测结果直接显示在已有表格中。悬停可查看 DNS、Ping 和端口检测详情；未检测或被排除的目标保持原样。网络探测不参与告警处置判断。
 
 **仅探测公网 IPv4，排除已知 CDN/WAF、DNS 服务器、内网和特殊地址。** IPv6、`0.0.0.0`、回环、链路本地、组播、保留和特殊用途地址直接跳过。域名只查询 A 记录并检查 CNAME，服务端逐个检查解析出的 IPv4，随后只向已检查的数字 IPv4 发起检测；不会再次解析域名后直接连接。
 
 ## 免安装 EXE 使用
 
-发布版已包含 Python、FastAPI、依赖和默认 CDN 规则。运行电脑无须安装 Python、运行 `Install.cmd` 或安装 Telnet 客户端。脚本 v21.0 无须为本次服务升级重新修改。
+发布版已包含 Python 运行时、Starlette、依赖和默认 CDN 规则。v1.3.0 改用 Starlette 0.49.3 与 Python 标准库校验请求，移除 FastAPI、Pydantic 和 `pydantic_core`，不再包含本次被拦截的 `_pydantic_core.pyd`。API v1、DNS 回退、Ping/TCP、过滤规则和持久配置继续沿用。运行电脑无须安装 Python、运行 `Install.cmd` 或安装 Telnet 客户端；现有 v21.0 及更新脚本无须为本次服务升级重新修改。
 
 在 [GitHub Releases](https://github.com/en0th/Windows_probe_service/releases/latest) 下载：
 
@@ -25,7 +25,9 @@
 
 ### 出现“应用程序控制策略已阻止此文件”
 
-若错误位于 `_pydantic_core`、其他 `.pyd` 或 DLL 的加载阶段，可先改用推荐便携包。单文件版会临时解压依赖；便携版从解压后的固定目录加载，减少临时目录变化。当前错误本身没有给出被阻止文件的完整路径，尚不能认定临时目录就是触发原因。
+v1.3.0 已从依赖与发布包中移除 `_pydantic_core`，解决旧版本仍需加载这一扩展的问题。请关闭旧服务并完整解压新版本便携包；若仍看到 `_pydantic_core` 的错误，先确认运行的是新包中的 EXE，且没有将新旧版本的 `_internal` 混合。
+
+推荐便携版从完整解压后的固定目录加载依赖；单文件版会临时解压依赖。两种布局仍包含 CPython 运行时和其他必要的 DLL/PYD，移除本次故障依赖**不能保证 Smart App Control 允许其他 EXE 或 DLL**。此版本未在用户开启 Smart App Control 的实机上验证；普通 Windows 构建与接口测试不代表该策略已批准程序。
 
 便携包**不能保证通过 App Control、WDAC、Smart App Control 或单位应用白名单**。个人电脑启用 **Smart App Control（智能应用控制）** 时，应将它与单位管理的白名单策略区分。固定目录并不使未受信任的 EXE 或依赖 DLL 自动获得信任；发布文件的哈希用于核对完整性，不等同于 Smart App Control 的单应用放行规则。[微软说明](https://support.microsoft.com/en-us/windows/what-is-smart-app-control-285ea03d-fa88-4d56-882e-6698afdb7003)指出，目前不支持对单个应用手动放行。外层 EXE 获得信任也不代表所有依赖 DLL 已受信任。如果拦截原因与应用信誉或受信任签名有关，单独改变打包方式不能代替这些要求。
 
@@ -44,7 +46,7 @@
 .\SOARProbe.exe --update-cdn-rules
 ```
 
-`--show-token` 只在显式调用时显示令牌；`--self-test` 不创建配置、不发起 DNS/ICMP/TCP 探测；更新 CDN 规则需要联网，成功后保存到用户数据目录并在下次启动时生效。损坏的覆盖规则会阻止服务启动，避免无规则探测。日志和配置均不写入程序文件夹或单文件版的临时解包目录。
+`--show-token` 只在显式调用时显示令牌；`--self-test` 不创建配置、不发起 DNS/ICMP/TCP 探测，会报告 HTTP/校验实现与 CPython 运行时位置，并确认未打包 Pydantic Core；更新 CDN 规则需要联网，成功后保存到用户数据目录并在下次启动时生效。损坏的覆盖规则会阻止服务启动，避免无规则探测。日志和配置均不写入程序文件夹或单文件版的临时解包目录。
 
 **源码包与发布包不同。** 当前源码包提供下面的 Windows 构建流程；如果目录中没有 `SOARProbe.exe`，需先在 Windows 构建。不能把源码 ZIP 或其他系统生成的二进制当成 Windows EXE。
 
@@ -53,15 +55,15 @@
 构建电脑需要 Windows 10/11 x64 和 64 位 Python 3.11 或更新版本；最终使用电脑不需要 Python。建议用 Python 3.12 构建。
 
 1. 将本目录完整放到 Windows 构建电脑。
-2. 双击 **`Build.cmd`**。首次构建需联网安装固定版本的构建依赖，脚本使用独立 `.build-venv`，不会修改系统 Python 依赖。
-3. 构建脚本先运行离线测试，再分别生成单文件版和便携版，检查 Windows x64 文件格式和冻结资源，并启动本地健康及认证检查，不下发任何探测目标。最终便携 ZIP 还会解压到带空格的目录，再执行同类检查。
+2. 双击 **`Build.cmd`**。构建需联网安装固定版本的构建依赖，脚本使用独立 `.build-venv`，会清除该构建环境中旧的 FastAPI/Pydantic/Pydantic Core，不会修改系统 Python 依赖。
+3. 构建脚本先运行离线测试，再分别生成单文件版和便携版，检查 Windows x64 文件格式、冻结资源和 CPython 运行时，并检查没有残留 FastAPI/Pydantic/Pydantic Core。随后启动本地健康及认证检查，不下发任何探测目标。最终便携 ZIP 还会解压到带空格的目录，再执行同类检查。
 4. 发布输出为 `dist\SOARProbe.exe`、`dist\SOARProbe-Windows-x64.zip`、`dist\SOARProbe-Windows-x64-portable.zip` 和校验文件。优先将便携 ZIP 发给使用者；使用者完整解压后即可运行，无须复制源码、虚拟环境或安装脚本。
 
 包内同时提供 `.github/workflows/build-windows-probe.yml`，可使用 GitHub 提供的 Windows 构建环境，本机无需安装 Python：
 
 1. 将构建包中的 `windows_probe_service` 文件夹和 `.github` 文件夹上传到自己的仓库，保持目录层级。
 2. 在仓库 **Actions → Build Windows probe EXE → Run workflow** 手动运行。
-3. 构建成功后下载 `SOARProbe-Windows-x64` artifact，解压获得 EXE、两种发布 ZIP 和校验文件。需要发布 GitHub Release 时，在 `release_tag` 填写与服务版本一致的标签（例如 `v1.2.1`）；留空只构建。
+3. 构建成功后下载 `SOARProbe-Windows-x64` artifact，解压获得 EXE、两种发布 ZIP 和校验文件。需要发布 GitHub Release 时，在 `release_tag` 填写与服务版本一致的标签（例如 `v1.3.0`）；留空只构建。
 
 上传范围仅需构建包内容，不要上传本机配置、令牌或诊断日志。工作流仅手动触发；只有显式填写 `release_tag` 时，独立发布任务才获得写权限，在 Windows 构建、自检和校验成功后上传 Release 附件。用于发布的仓库还需包含 `RELEASE_NOTES.md`。
 
@@ -69,7 +71,7 @@ Windows EXE 必须在 Windows 上构建，不能将 macOS 产物转换或改名�
 
 ## 直接运行 Python 源码
 
-先更新油猴脚本至 v21.0：将另外提供的 `SOAR 批量封堵调度.txt` 完整内容替换到原有脚本编辑器并保存，然后刷新原站页面。服务发布 ZIP 不包含油猴脚本。若通过导入新增了脚本，请停用旧副本，避免同时运行多个版本。
+首次使用时安装当前油猴脚本 v23.0：将另外提供的 `SOAR 批量封堵调度.txt` 完整内容替换到原有脚本编辑器并保存，然后刷新原站页面。已有 v21.0 或更新脚本可继续使用；仅升级本服务无需重装脚本。服务发布 ZIP 不包含油猴脚本。若通过导入新增了脚本，请停用旧副本，避免同时运行多个版本。
 
 1. 安装 Windows 64 位 Python 3.11 或更新版本，推荐 Python 3.11–3.13。安装程序中启用 Python launcher（`py`）。
 2. 将整个 `windows_probe_service` 文件夹复制到 Windows 的固定目录，例如 `C:\SOAR\windows_probe_service`，保持所有文件一起复制，包含 `cdn_rules.json`。
@@ -188,7 +190,7 @@ Windows Ping 使用原生 IPv4 `IcmpSendEcho`，不解析中英文 `ping.exe` �
 
 ## 排错
 
-- **应用程序控制策略阻止 DLL：** 可先尝试完整便携包。个人 Smart App Control 仍可能拒绝未知程序或依赖，按上文区分代码信任与企业策略审批；单位管理设备再由管理员审核对应规则。启动被阻止时可能尚未生成服务日志，请保留错误窗口。
+- **应用程序控制策略阻止 DLL：** 先确认完整解压并运行 v1.3.0 的新包，避免混用旧依赖。新包已移除 `_pydantic_core`；个人 Smart App Control 仍可能拒绝其他程序或依赖，按上文区分代码信任与企业策略审批。启动被阻止时可能尚未生成服务日志，请保留完整错误窗口和具体文件路径。
 - **无法连接服务：** 检查服务窗口是否运行，打开 `http://127.0.0.1:8765/health` 应看到 `status: "ok"`。此接口不返回令牌。
 - **401：** 服务令牌与脚本中保存的令牌不一致，在服务窗口按 C 复制令牌后保存脚本配置；源码版也可运行 `Show-Token.cmd`。
 - **429：** 全局队列或活动任务达到上限，稍后重新探测，避免快速重复查询。
@@ -200,7 +202,7 @@ Windows Ping 使用原生 IPv4 `IcmpSendEcho`，不解析中英文 `ping.exe` �
 
 ## API v1
 
-除 `GET /health` 外，都要求 `Authorization: Bearer <token>`，仅接受本机来源和本机 Host。
+除 `GET/HEAD /health` 外，都要求 `Authorization: Bearer <token>`，仅接受本机来源和本机 Host。v1.3.0 底层改用 Starlette，客户端 API 字段保持不变。
 
 - `GET /v1/auth-check`：认证检查，不创建任务、不执行 DNS/ICMP/TCP。
 - `POST /v1/probes`：提交 `{"queryId":"q1","excludedHosts":["93.184.216.34"],"excludedCidrs":["210.39.0.0/20"],"targets":[{"id":"t1","host":"example.com","port":443}]}`，返回 HTTP 202 和 `jobId/queryId/total/cursor`。`port` 可省略或为 `null`：域名按 80、443 检测，IPv4 只检测 Ping；有 `port` 时只检测指定端口。`excludedHosts` 为兼容旧客户端保留，可省略，最多 200 个规范 IPv4；`excludedCidrs` 可省略，最多 2048 个规范 IPv4 地址或网络地址 CIDR。脚本 v21.0 从统一安全过滤清单生成排除规则。所有排除配置参与缓存隔离，并检查域名解析后的地址。
@@ -208,6 +210,8 @@ Windows Ping 使用原生 IPv4 `IcmpSendEcho`，不解析中英文 `ping.exe` �
 - `DELETE /v1/probes/{jobId}`：取消该任务后续结果。尚未开始且无人订阅的共享目标会跳过；已发出的单次 ICMP/TCP 在有限超时内结束，其他任务订阅的共享目标继续执行。
 
 每个目标返回 `id/host/port/resolved/aliases/dns/nslookup/ping/tcp/cached/finishedAt`；`nslookup` 包含 A 记录、CNAME、采用的解析服务器和逐次尝试详情，直接 IPv4 为 `not_applicable`。DNS 命中 CDN 时附带 `skipped`。跳过项含 `reason/rule/source`，规则有供应商信息时附带 `provider`。不提供任意命令执行、端口范围扫描或转发原站登录凭据的接口。
+
+提交请求必须使用 `Content-Type: application/json`，否则返回 415。身份验证先于 JSON 与字段校验；无效令牌返回 401，错误 JSON、未知字段、重复目标 ID、非整数端口或非法游标返回 422。端口只接受 1–65535 的整数或 `null`，不将字符串、布尔值或浮点数自动转换。请求正文最多 2 MiB，超过返回 413。错误响应不回显提交的目标、原始正文或令牌。
 
 ## 离线测试
 
@@ -218,4 +222,4 @@ Windows Ping 使用原生 IPv4 `IcmpSendEcho`，不解析中英文 `ping.exe` �
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-测试通过模拟 DNS、ICMP、TCP 和本地 HTTP ASGI 请求检查策略、队列、去重、取消和协议，不向真实目标发起网络探测。GitHub Actions 在 Windows 上执行测试，并实际启动生成的两种 EXE 验证冻结资源、健康接口和令牌认证；便携 ZIP 会完整解压后再次验证。构建环境不复现部署机器的应用控制策略，测试通过不等同于已获得该机器的策略批准。实际目标的网络可达性取决于部署机器；详细证据记录在日志中。
+测试通过模拟 DNS、ICMP、TCP 和本地 HTTP ASGI 请求检查策略、队列、去重、取消和协议，包括认证顺序、严格 JSON/类型校验及正文大小限制，不向真实目标发起网络探测。GitHub Actions 在 Windows 上执行测试，并实际启动生成的两种 EXE 验证冻结资源、依赖移除、健康接口和令牌认证；便携 ZIP 会完整解压后再次验证。构建环境不复现部署机器的 Smart App Control 策略，测试通过不等同于已获得该机器的策略批准。实际目标的网络可达性取决于部署机器；详细证据记录在日志中。

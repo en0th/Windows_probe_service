@@ -27,17 +27,19 @@ import uuid
 import dns.asyncresolver
 import dns.exception
 import dns.resolver
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
+from starlette.applications import Starlette
+from starlette.exceptions import HTTPException
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.routing import Route
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from network_policy import NetworkPolicy
+from probe_models import MAX_TARGETS, ProbeBatch, ProbeTarget, ValidationError, normalize_host
 import windows_icmp
 
 API_VERSION = 1
-SERVICE_VERSION = "1.2.1"
-MAX_TARGETS = 4000
+SERVICE_VERSION = "1.3.0"
 MAX_DNS_ADDRESSES = 64
 DNS_RESOLVER_SEQUENCE = ("system", "8.8.8.8", "223.5.5.5")
 DOMAIN_DEFAULT_PORTS = (80, 443)
@@ -63,14 +65,27 @@ def resolve_rules_path(data_dir: Path) -> Path:
 def run_self_test() -> dict:
     """Check packaged dependencies and data without probing or creating settings."""
     import uvicorn
-    import fastapi
-    import pydantic
+    import starlette
     import dns
     import importlib
-    core_binary = importlib.import_module("pydantic_core._pydantic_core")
+    import importlib.util
     frozen = bool(getattr(sys, "frozen", False))
     runtime_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)).resolve()
     bundle_layout = ("onedir" if runtime_dir == Path(sys.executable).resolve().parent / "_internal" else "onefile") if frozen else "source"
+    forbidden = ("fastapi", "pydantic", "pydantic_core", "_pydantic_core")
+    if any(name.split(".")[0] in forbidden for name in sys.modules):
+        raise RuntimeError("legacy validation dependency was loaded")
+    if frozen:
+        if any(importlib.util.find_spec(name) is not None for name in forbidden):
+            raise RuntimeError("legacy validation dependency remains in the bundle")
+        if any(any(part.lower().startswith(forbidden) for part in path.relative_to(runtime_dir).parts)
+               for path in runtime_dir.rglob("*")):
+            raise RuntimeError("legacy validation dependency remains in bundled files")
+        python_runtime = runtime_dir / f"python{sys.version_info.major}{sys.version_info.minor}.dll"
+        if not python_runtime.is_file():
+            raise RuntimeError("bundled Python runtime missing")
+    else:
+        python_runtime = Path(sys.executable).resolve()
     for module in ("uvicorn.protocols.http.h11_impl", "uvicorn.lifespan.on", "uvicorn.loops.asyncio", "dns._asyncio_backend", "anyio._backends._asyncio"):
         importlib.import_module(module)
     policy = NetworkPolicy(resource_path("cdn_rules.json"))
@@ -80,10 +95,12 @@ def run_self_test() -> dict:
         raise RuntimeError("address exclusion self-test failed")
     return {"status": "ok", "service": "soar-network-probe", "version": SERVICE_VERSION,
             "apiVersion": API_VERSION, "frozen": frozen, "bundleLayout": bundle_layout,
-            "nativeDependencies": {"pydanticCore": str(Path(core_binary.__file__).resolve())},
+            "httpStack": "starlette", "validationImplementation": "python",
+            "pydanticCoreBundled": False,
+            "nativeDependencies": {"pythonRuntime": str(python_runtime)},
             "ipv4Only": True, "cdnRulesVersion": policy.version,
             "cdnCidrs": len(policy.cidrs), "cdnDomainSuffixes": len(policy.domains),
-            "dependencies": {"fastapi": fastapi.__version__, "pydantic": pydantic.__version__,
+            "dependencies": {"starlette": starlette.__version__,
                              "uvicorn": uvicorn.__version__, "dnspython": dns.__version__}}
 
 
@@ -169,86 +186,6 @@ def start_console_controls(server, settings):
 
 def utcnow():
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
-
-
-def normalize_host(value: str) -> str:
-    value = value.strip()
-    if value.startswith("[") and value.endswith("]"):
-        value = value[1:-1]
-    if not value or len(value) > 253 or any(c in value for c in "/\\@%?#\r\n\t "):
-        raise ValueError("host must be an IP address or DNS hostname")
-    try:
-        return str(ipaddress.ip_address(value))
-    except ValueError:
-        pass
-    try:
-        value = value.rstrip(".").encode("idna").decode("ascii").lower()
-    except UnicodeError as exc:
-        raise ValueError("invalid hostname") from exc
-    if len(value) > 253 or not all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in value.split(".")):
-        raise ValueError("invalid hostname")
-    # Numeric and hexadecimal pseudo-IPv4 strings must not be sent to a resolver.
-    if "." not in value or re.fullmatch(r"[0-9.]+", value) or value.startswith("0x"):
-        raise ValueError("use a full DNS hostname or canonical IP address")
-    return value
-
-
-class ProbeTarget(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    id: str = Field(min_length=1, max_length=160)
-    host: str = Field(min_length=1, max_length=253)
-    port: Optional[StrictInt] = Field(default=None, ge=1, le=65535)
-
-    @field_validator("host")
-    @classmethod
-    def host_valid(cls, value):
-        return normalize_host(value)
-
-
-class ProbeBatch(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    queryId: str = Field(min_length=1, max_length=160)
-    targets: list[ProbeTarget] = Field(min_length=1, max_length=MAX_TARGETS)
-    excludedHosts: list[str] = Field(default_factory=list, max_length=200)
-    excludedCidrs: list[str] = Field(default_factory=list, max_length=2048)
-
-    @field_validator("excludedCidrs")
-    @classmethod
-    def exclusion_cidrs_valid(cls, values):
-        normalized = []
-        for value in values:
-            try:
-                network = ipaddress.ip_network(value.strip(), strict=True)
-            except ValueError as exc:
-                raise ValueError("excludedCidrs must contain canonical IPv4 addresses or CIDRs") from exc
-            if network.version != 4:
-                raise ValueError("excludedCidrs must contain IPv4 addresses or CIDRs")
-            canonical = str(network)
-            if canonical not in normalized:
-                normalized.append(canonical)
-        return normalized
-
-    @field_validator("excludedHosts")
-    @classmethod
-    def exclusions_valid(cls, values):
-        normalized = []
-        for value in values:
-            try:
-                address = ipaddress.ip_address(value.strip())
-            except ValueError as exc:
-                raise ValueError("excludedHosts must contain IPv4 addresses") from exc
-            if address.version != 4:
-                raise ValueError("excludedHosts must contain IPv4 addresses")
-            canonical = str(address)
-            if canonical not in normalized:
-                normalized.append(canonical)
-        return normalized
-
-    @model_validator(mode="after")
-    def unique_ids(self):
-        if len({target.id for target in self.targets}) != len(self.targets):
-            raise ValueError("target ids must be unique within a job")
-        return self
 
 
 @dataclass
@@ -782,21 +719,18 @@ def create_app(settings=None, policy=None, engine=None, logger=None):
                 handler.close()
                 logger.removeHandler(handler)
 
-    app = FastAPI(title="SOAR local probe", version=SERVICE_VERSION, lifespan=lifespan,
-                  docs_url=None, redoc_url=None, openapi_url=None)
-    app.state.engine = engine
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "[::1]"])
-    app.add_middleware(BodyLimitMiddleware)
-
-    async def authenticate(authorization: Optional[str] = Header(default=None)):
+    def authenticate(request: Request):
+        authorization = request.headers.get("authorization")
         prefix = "Bearer "
         supplied = authorization[len(prefix):] if authorization and authorization.startswith(prefix) else ""
-        if not hmac.compare_digest(supplied.encode("utf-8"), settings.token.encode("utf-8")):
-            raise HTTPException(status_code=401, detail="invalid_token", headers={"WWW-Authenticate": "Bearer"})
+        if (len(request.headers.getlist("authorization")) != 1
+                or not hmac.compare_digest(supplied.encode("utf-8"), settings.token.encode("utf-8"))):
+            return JSONResponse({"detail": "invalid_token"}, status_code=401,
+                                headers={"WWW-Authenticate": "Bearer"})
+        return None
 
-    @app.get("/health")
-    async def health():
-        return {"status": "ok", "service": "soar-network-probe", "apiVersion": API_VERSION,
+    async def health(request: Request):
+        return JSONResponse({"status": "ok", "service": "soar-network-probe", "apiVersion": API_VERSION,
                 "version": SERVICE_VERSION, "platform": "windows" if os.name == "nt" else "unsupported",
                 "cdnRulesVersion": policy.version, "cdnRulesUpdatedAt": policy.updated_at,
                 "cdnCidrs": len(policy.cidrs), "cdnDomainSuffixes": len(policy.domains),
@@ -804,39 +738,84 @@ def create_app(settings=None, policy=None, engine=None, logger=None):
                 "safetyExclusions": True, "excludedCidrsSupported": True,
                 "domainNslookup": True, "domainPing": True,
                 "domainDnsFallback": True, "domainDefaultPorts": list(DOMAIN_DEFAULT_PORTS),
-                "dnsExcluded": True, "excludedDnsAddresses": len(policy.dns_addresses)}
+                "dnsExcluded": True, "excludedDnsAddresses": len(policy.dns_addresses)})
 
-    @app.post("/v1/probes", status_code=202, dependencies=[Depends(authenticate)])
-    async def submit(batch: ProbeBatch):
+    def reject_constant(value):
+        raise ValueError("non-standard JSON constant")
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON field")
+            result[key] = value
+        return result
+
+    async def submit(request: Request):
+        denied = authenticate(request)
+        if denied is not None:
+            return denied
+        if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+            return JSONResponse({"detail": "json_required"}, status_code=415)
+        try:
+            payload = json.loads(await request.body(), parse_constant=reject_constant,
+                                 object_pairs_hook=unique_object)
+            batch = ProbeBatch.model_validate(payload)
+        except (ValueError, TypeError, RecursionError, UnicodeError):
+            return JSONResponse({"detail": "invalid_probe_request"}, status_code=422)
         if os.name != "nt" and not getattr(engine, "allow_non_windows", False):
-            raise HTTPException(status_code=503, detail="windows_required")
+            return JSONResponse({"detail": "windows_required"}, status_code=503)
         try:
             job = engine.submit(batch)
         except CapacityError as exc:
-            raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": "2"}) from exc
-        return {"jobId": job.id, "queryId": job.query_id, "total": job.total, "cursor": 0}
+            return JSONResponse({"detail": str(exc)}, status_code=429, headers={"Retry-After": "2"})
+        return JSONResponse({"jobId": job.id, "queryId": job.query_id, "total": job.total, "cursor": 0}, status_code=202)
 
-    @app.get("/v1/auth-check", dependencies=[Depends(authenticate)])
-    async def auth_check():
-        return {"status": "ok", "service": "soar-network-probe", "apiVersion": API_VERSION}
+    async def auth_check(request: Request):
+        denied = authenticate(request)
+        if denied is not None:
+            return denied
+        return JSONResponse({"status": "ok", "service": "soar-network-probe", "apiVersion": API_VERSION})
 
-    @app.get("/v1/probes/{job_id}", dependencies=[Depends(authenticate)])
-    async def results(job_id: str, after: int = Query(default=0, ge=0, le=MAX_TARGETS)):
+    async def results(request: Request):
+        denied = authenticate(request)
+        if denied is not None:
+            return denied
+        values = request.query_params.getlist("after")
+        cursor = values[0] if values else "0"
+        if len(values) > 1 or not re.fullmatch(r"[0-9]{1,5}", cursor) or int(cursor) > MAX_TARGETS:
+            return JSONResponse({"detail": "invalid_cursor"}, status_code=422)
         try:
-            return engine.snapshot(job_id, after)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail="job_not_found") from exc
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail="cursor_ahead") from exc
+            return JSONResponse(engine.snapshot(request.path_params["job_id"], int(cursor)))
+        except KeyError:
+            return JSONResponse({"detail": "job_not_found"}, status_code=404)
+        except ValueError:
+            return JSONResponse({"detail": "cursor_ahead"}, status_code=400)
 
-    @app.delete("/v1/probes/{job_id}", dependencies=[Depends(authenticate)])
-    async def cancel(job_id: str):
+    async def cancel(request: Request):
+        denied = authenticate(request)
+        if denied is not None:
+            return denied
         try:
-            job = engine.cancel(job_id)
-            return {"jobId": job.id, "queryId": job.query_id, "status": job.status,
-                    "completed": len(job.results), "total": job.total}
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail="job_not_found") from exc
+            job = engine.cancel(request.path_params["job_id"])
+            return JSONResponse({"jobId": job.id, "queryId": job.query_id, "status": job.status,
+                                 "completed": len(job.results), "total": job.total})
+        except KeyError:
+            return JSONResponse({"detail": "job_not_found"}, status_code=404)
+
+    async def http_error(request: Request, error: HTTPException):
+        return JSONResponse({"detail": error.detail}, status_code=error.status_code, headers=error.headers)
+
+    app = Starlette(lifespan=lifespan, exception_handlers={HTTPException: http_error}, routes=[
+        Route("/health", health, methods=["GET"]),
+        Route("/v1/auth-check", auth_check, methods=["GET"]),
+        Route("/v1/probes", submit, methods=["POST"]),
+        Route("/v1/probes/{job_id}", results, methods=["GET"]),
+        Route("/v1/probes/{job_id}", cancel, methods=["DELETE"]),
+    ])
+    app.state.engine = engine
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "[::1]"])
+    app.add_middleware(BodyLimitMiddleware)
     return app
 
 

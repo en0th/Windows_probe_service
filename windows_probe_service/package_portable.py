@@ -53,6 +53,8 @@ def _safe_relative(name):
         raise ValueError("Unsafe release member path")
     if any(part.casefold() in SOURCE_ENVIRONMENT_DIRS for part in path.parts):
         raise ValueError("Source or build environment directory in release")
+    if any(part.casefold().startswith(("fastapi", "pydantic", "_pydantic_core")) for part in path.parts):
+        raise ValueError("Removed FastAPI/Pydantic dependency in release: " + name)
     if path.parts[0] not in ROOT_NAMES:
         raise ValueError("Unexpected release root member: " + path.parts[0])
     if len(path.parts) > 1 and path.parts[0] != "_internal":
@@ -69,11 +71,11 @@ def _validate_files(names):
         raise ValueError("_internal must be a directory, not a payload file")
     if not REQUIRED_FILES.issubset(names):
         raise ValueError("Release is missing required files: " + ", ".join(sorted(REQUIRED_FILES - set(names))))
-    pyds = sorted(name for name in names if name.startswith("_internal/pydantic_core/")
-                  and PurePosixPath(name).name.startswith("_pydantic_core") and name.endswith(".pyd"))
-    if not pyds:
-        raise ValueError("Release is missing the bundled _pydantic_core .pyd dependency")
-    return pyds
+    runtimes = sorted(name for name in names
+                      if re.fullmatch(r"_internal/python3\d+(?:t|_d)?\.dll", name, re.IGNORECASE))
+    if not runtimes:
+        raise ValueError("Release is missing its versioned Python runtime DLL in _internal")
+    return runtimes
 
 
 def _parse_manifest(content):
@@ -110,7 +112,7 @@ def verify_portable_archive(archive_path):
             if stat.S_ISLNK(mode) or stat.S_IFMT(mode) not in {0, stat.S_IFREG}:
                 raise ValueError("Portable ZIP contains a symlink or special file")
             names.append(name)
-        pyds = _validate_files(names)
+        runtimes = _validate_files(names)
         if MANIFEST not in names:
             raise ValueError("Portable ZIP is missing its full-file manifest")
         if archive.testzip() is not None:
@@ -124,7 +126,7 @@ def verify_portable_archive(archive_path):
                 raise ValueError("Portable manifest hash mismatch: " + name)
         return {"fileCount": len(names), "payloadFileCount": len(entries),
                 "zipSha256": _sha256_file(archive_path), "exeSha256": entries["SOARProbe.exe"],
-                "requiredPydPath": pyds[0], "requiredPydPaths": pyds}
+                "pythonRuntimePaths": runtimes}
 
 
 def package_portable(app_dir, output_zip):

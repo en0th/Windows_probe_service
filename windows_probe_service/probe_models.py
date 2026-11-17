@@ -1,0 +1,175 @@
+"""Strict API request models with only Python standard-library dependencies.
+
+Keep validation separate from the HTTP adapter so importing the probe service
+does not need Pydantic's native extension. These models preserve the v1 JSON
+contract; network eligibility remains the responsibility of NetworkPolicy.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+import ipaddress
+import re
+
+
+MAX_TARGETS = 4000
+
+
+class ValidationError(ValueError):
+    """A request validation failure whose public details contain no input data."""
+
+    def __init__(self, message: str, *, loc=(), error_type="value_error"):
+        super().__init__(message)
+        self.loc = tuple(loc)
+        self.error_type = error_type
+
+    def errors(self) -> list[dict]:
+        return [{"type": self.error_type, "loc": self.loc, "msg": str(self)}]
+
+    def with_prefix(self, *prefix) -> ValidationError:
+        return ValidationError(str(self), loc=(*prefix, *self.loc), error_type=self.error_type)
+
+
+def normalize_host(value: str) -> str:
+    """Normalize canonical IPs and full DNS names, rejecting command-like input."""
+    if not isinstance(value, str):
+        raise ValueError("host must be an IP address or DNS hostname")
+    value = value.strip()
+    if value.startswith("[") and value.endswith("]"):
+        value = value[1:-1]
+    if not value or len(value) > 253 or any(c in value for c in "/\\@%?#\r\n\t "):
+        raise ValueError("host must be an IP address or DNS hostname")
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError:
+        pass
+    try:
+        value = value.rstrip(".").encode("idna").decode("ascii").lower()
+    except UnicodeError as exc:
+        raise ValueError("invalid hostname") from exc
+    if len(value) > 253 or not all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in value.split(".")):
+        raise ValueError("invalid hostname")
+    if "." not in value or re.fullmatch(r"[0-9.]+", value) or value.startswith("0x"):
+        raise ValueError("use a full DNS hostname or canonical IP address")
+    return value
+
+
+def _check_fields(data: dict, allowed: set[str], required: tuple[str, ...]):
+    for key in data:
+        if key not in allowed:
+            raise ValidationError("Extra inputs are not permitted", loc=(key,), error_type="extra_forbidden")
+    for key in required:
+        if key not in data:
+            raise ValidationError("Field required", loc=(key,), error_type="missing")
+
+
+def _string(value, field: str, maximum: int) -> str:
+    if not isinstance(value, str):
+        raise ValidationError("Input should be a valid string", loc=(field,), error_type="string_type")
+    if not 1 <= len(value) <= maximum:
+        raise ValidationError(f"String must contain between 1 and {maximum} characters", loc=(field,), error_type="string_length")
+    return value
+
+
+def _list(value, field: str, maximum: int, minimum: int = 0) -> list:
+    if not isinstance(value, list):
+        raise ValidationError("Input should be a valid list", loc=(field,), error_type="list_type")
+    if not minimum <= len(value) <= maximum:
+        raise ValidationError(f"List must contain between {minimum} and {maximum} items", loc=(field,), error_type="list_length")
+    return value
+
+
+def _exclusions(values, field: str, maximum: int, *, cidrs: bool) -> list[str]:
+    values = _list(values, field, maximum)
+    normalized, seen = [], set()
+    for index, value in enumerate(values):
+        if not isinstance(value, str):
+            raise ValidationError("Input should be a valid string", loc=(field, index), error_type="string_type")
+        message = ("excludedCidrs must contain canonical IPv4 addresses or CIDRs" if cidrs
+                   else "excludedHosts must contain IPv4 addresses")
+        try:
+            address = ipaddress.ip_network(value.strip(), strict=True) if cidrs else ipaddress.ip_address(value.strip())
+        except ValueError as exc:
+            raise ValidationError(message, loc=(field, index)) from exc
+        if address.version != 4:
+            raise ValidationError(message, loc=(field, index))
+        canonical = str(address)
+        if canonical not in seen:
+            normalized.append(canonical)
+            seen.add(canonical)
+    return normalized
+
+
+@dataclass(frozen=True, init=False)
+class ProbeTarget:
+    id: str
+    host: str
+    port: int | None
+
+    def __init__(self, **data):
+        _check_fields(data, {"id", "host", "port"}, ("id", "host"))
+        target_id = _string(data["id"], "id", 160)
+        host = _string(data["host"], "host", 253)
+        try:
+            host = normalize_host(host)
+        except ValueError as exc:
+            raise ValidationError(str(exc), loc=("host",)) from exc
+        port = data.get("port")
+        if port is not None and (type(port) is not int or not 1 <= port <= 65535):
+            raise ValidationError("Port must be an integer between 1 and 65535", loc=("port",), error_type="int_range")
+        object.__setattr__(self, "id", target_id)
+        object.__setattr__(self, "host", host)
+        object.__setattr__(self, "port", port)
+
+    @classmethod
+    def model_validate(cls, value) -> ProbeTarget:
+        if isinstance(value, cls):
+            value = value.model_dump()
+        if not isinstance(value, dict):
+            raise ValidationError("Input should be a valid object", error_type="model_type")
+        _check_fields(value, {"id", "host", "port"}, ("id", "host"))
+        return cls(**value)
+
+    def model_dump(self) -> dict:
+        return {"id": self.id, "host": self.host, "port": self.port}
+
+
+@dataclass(frozen=True, init=False)
+class ProbeBatch:
+    queryId: str
+    targets: list[ProbeTarget]
+    excludedHosts: list[str]
+    excludedCidrs: list[str]
+
+    def __init__(self, **data):
+        _check_fields(data, {"queryId", "targets", "excludedHosts", "excludedCidrs"}, ("queryId", "targets"))
+        query_id = _string(data["queryId"], "queryId", 160)
+        raw_targets = _list(data["targets"], "targets", MAX_TARGETS, minimum=1)
+        targets, ids = [], set()
+        for index, value in enumerate(raw_targets):
+            try:
+                target = ProbeTarget.model_validate(value)
+            except ValidationError as exc:
+                raise exc.with_prefix("targets", index) from exc
+            if target.id in ids:
+                raise ValidationError("target ids must be unique within a job", loc=("targets", index, "id"))
+            ids.add(target.id)
+            targets.append(target)
+        excluded_hosts = _exclusions(data.get("excludedHosts", []), "excludedHosts", 200, cidrs=False)
+        excluded_cidrs = _exclusions(data.get("excludedCidrs", []), "excludedCidrs", 2048, cidrs=True)
+        object.__setattr__(self, "queryId", query_id)
+        object.__setattr__(self, "targets", targets)
+        object.__setattr__(self, "excludedHosts", excluded_hosts)
+        object.__setattr__(self, "excludedCidrs", excluded_cidrs)
+
+    @classmethod
+    def model_validate(cls, value) -> ProbeBatch:
+        if isinstance(value, cls):
+            value = value.model_dump()
+        if not isinstance(value, dict):
+            raise ValidationError("Input should be a valid object", error_type="model_type")
+        _check_fields(value, {"queryId", "targets", "excludedHosts", "excludedCidrs"}, ("queryId", "targets"))
+        return cls(**value)
+
+    def model_dump(self) -> dict:
+        return {"queryId": self.queryId, "targets": [target.model_dump() for target in self.targets],
+                "excludedHosts": list(self.excludedHosts), "excludedCidrs": list(self.excludedCidrs)}

@@ -16,11 +16,11 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
-from pydantic import ValidationError
 
 SERVICE_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SERVICE_DIR))
 import service
+from probe_models import ValidationError
 import windows_icmp
 from network_policy import NetworkPolicy, DEFAULT_SAFETY_CIDRS
 import update_cdn_rules

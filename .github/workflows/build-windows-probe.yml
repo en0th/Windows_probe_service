@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Optional release version, for example v1.2.1 (blank builds only)'
+        description: 'Optional release version, for example v1.3.0 (blank builds only)'
         required: false
         default: ''
         type: string

@@ -13,7 +13,7 @@ datas = [
     (str(service_dir / "cdn_rules.json"), "."),
     (str(service_dir / "LICENSE.cdncheck.md"), "."),
 ]
-for distribution in ("fastapi", "pydantic", "pydantic_core", "starlette", "uvicorn", "dnspython", "anyio"):
+for distribution in ("starlette", "uvicorn", "dnspython", "anyio"):
     datas += copy_metadata(distribution)
 
 a = Analysis(
@@ -34,7 +34,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["uvloop", "watchfiles", "websockets", "wsproto"],
+    excludes=["uvloop", "watchfiles", "websockets", "wsproto", "fastapi", "pydantic", "pydantic_core"],
     noarchive=False,
     optimize=0,
 )

@@ -32,6 +32,10 @@ if (-not (Test-Path -LiteralPath $buildPython)) {
 }
 & $buildPython -c $pythonCheck
 if ($LASTEXITCODE -ne 0) { throw 'The existing .build-venv is incompatible. Rename it, then rebuild with Windows x64 Python.' }
+# Clean only this project's isolated build environment when upgrading an older
+# build. These removed packages must not leak into either release layout.
+& $buildPython -m pip uninstall -y fastapi pydantic pydantic_core
+if ($LASTEXITCODE -ne 0) { throw 'Removing obsolete dependencies from .build-venv failed.' }
 & $buildPython -m pip install --disable-pip-version-check -r requirements-build.txt
 if ($LASTEXITCODE -ne 0) { throw 'Installing build dependencies failed. Check access to the configured Python package index.' }
 & $buildPython -m pip check
@@ -60,13 +64,15 @@ function Test-BundledExecutable {
     if ($LASTEXITCODE -ne 0) { throw 'The generated EXE failed its offline self-test.' }
     $selfTest = ($selfTestLines -join "`n") | ConvertFrom-Json
     if ($selfTest.status -ne 'ok' -or $selfTest.frozen -ne $true -or $selfTest.bundleLayout -ne $Layout) { throw 'The EXE did not confirm bundled runtime/resources in its self-test.' }
+    if ($selfTest.httpStack -ne 'starlette' -or $selfTest.validationImplementation -ne 'python' -or $selfTest.pydanticCoreBundled -isnot [bool] -or $selfTest.pydanticCoreBundled -ne $false) { throw 'The EXE did not confirm the Starlette/Python implementation without pydantic_core.' }
 
     if ($Layout -eq 'onedir') {
-        $expectedCoreRoot = [System.IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $exePath) '_internal\pydantic_core')) + [System.IO.Path]::DirectorySeparatorChar
-        $actualCore = [System.IO.Path]::GetFullPath([string]$selfTest.nativeDependencies.pydanticCore)
-        if (-not $actualCore.StartsWith($expectedCoreRoot, [System.StringComparison]::OrdinalIgnoreCase)) { throw 'Portable service imported pydantic_core outside its fixed _internal folder.' }
-        $coreSignature = Get-AuthenticodeSignature -FilePath $actualCore
-        Write-Host ('Portable pydantic_core signature status: ' + $coreSignature.Status)
+        $expectedRuntimeRoot = [System.IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $exePath) '_internal'))
+        $actualRuntime = [System.IO.Path]::GetFullPath([string]$selfTest.nativeDependencies.pythonRuntime)
+        $actualRuntimeRoot = [System.IO.Path]::GetDirectoryName($actualRuntime)
+        if (-not $actualRuntimeRoot.Equals($expectedRuntimeRoot, [System.StringComparison]::OrdinalIgnoreCase) -or [System.IO.Path]::GetFileName($actualRuntime) -notmatch '^python3\d+(?:t|_d)?\.dll$' -or -not (Test-Path -LiteralPath $actualRuntime -PathType Leaf)) { throw 'Portable service did not load a versioned Python runtime DLL from its fixed _internal folder.' }
+        $runtimeSignature = Get-AuthenticodeSignature -FilePath $actualRuntime
+        Write-Host ('Portable PythonRuntime signature status: ' + $runtimeSignature.Status)
     }
 
     # Smoke the actual bundled ASGI server on loopback, without submitting targets.
@@ -185,5 +191,5 @@ Write-Host $exePath
 Write-Host $zipPath
 Write-Host $portableZip
 Write-Host ('SHA256: ' + $hash)
-Write-Host 'Verified portable ZIP after extraction: onedir runtime and pydantic_core from its fixed _internal folder.'
+Write-Host 'Verified portable ZIP after extraction: PythonRuntime from its fixed _internal folder; no FastAPI/Pydantic dependency.'
 Write-Host 'Application-control policy acceptance is not tested by a standard Windows runner.'

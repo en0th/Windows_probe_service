@@ -97,8 +97,46 @@ class FrozenRuntimeTests(unittest.TestCase):
             result = service.run_self_test()
         self.assertIsInstance(result, dict)
         self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["httpStack"], "starlette")
+        self.assertEqual(result["validationImplementation"], "python")
+        self.assertIs(result["pydanticCoreBundled"], False)
+        self.assertEqual(set(result["dependencies"]), {"starlette", "uvicorn", "dnspython"})
         self.assertNotIn("token", json.dumps(result).lower())
         self.assertIsInstance(json.loads(json.dumps(result)), dict)
+
+    def test_frozen_self_test_rejects_legacy_modules_hidden_in_archive(self):
+        with patch.object(sys, "frozen", True, create=True), \
+             patch.object(sys, "_MEIPASS", str(self.folder), create=True), \
+             patch("importlib.util.find_spec", return_value=object()):
+            with self.assertRaisesRegex(RuntimeError, "remains in the bundle"):
+                service.run_self_test()
+
+    def test_frozen_self_test_rejects_bare_or_nested_legacy_binary(self):
+        for relative in ["_pydantic_core.cp312-win_amd64.pyd", "nested/pydantic_core/core.pyd"]:
+            with self.subTest(path=relative), tempfile.TemporaryDirectory() as directory:
+                bundle = Path(directory)
+                binary = bundle / relative
+                binary.parent.mkdir(parents=True, exist_ok=True)
+                binary.touch()
+                with patch.object(sys, "frozen", True, create=True), \
+                     patch.object(sys, "_MEIPASS", str(bundle), create=True), \
+                     patch("importlib.util.find_spec", return_value=None):
+                    with self.assertRaisesRegex(RuntimeError, "remains in bundled files"):
+                        service.run_self_test()
+
+    def test_frozen_self_test_reports_fixed_python_runtime(self):
+        bundle = self.folder / "_internal"
+        self.write_rules(bundle)
+        (bundle / "LICENSE.cdncheck.md").write_text("offline fixture", encoding="utf-8")
+        runtime = bundle / f"python{sys.version_info.major}{sys.version_info.minor}.dll"
+        runtime.touch()
+        with patch.object(sys, "frozen", True, create=True), \
+             patch.object(sys, "_MEIPASS", str(bundle), create=True), \
+             patch.object(sys, "executable", str(self.folder / "SOARProbe.exe")), \
+             patch("importlib.util.find_spec", return_value=None):
+            result = service.run_self_test()
+        self.assertEqual(result["bundleLayout"], "onedir")
+        self.assertEqual(result["nativeDependencies"]["pythonRuntime"], str(runtime.resolve()))
 
     def test_self_test_cli_does_not_create_configuration(self):
         stdout = io.StringIO()
