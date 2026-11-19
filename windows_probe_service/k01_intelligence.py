@@ -13,6 +13,7 @@ import copy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import errno
+import http.client
 import ipaddress
 import json
 import logging
@@ -20,8 +21,10 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
 import socket
 import ssl
+import subprocess
 import tempfile
 import time
 from urllib.error import HTTPError, URLError
@@ -46,6 +49,24 @@ _SECRET_KEY = re.compile(r"password|(?:access_|refresh_)?token|cookie|authorizat
 _TRACE_ID = contextvars.ContextVar("soar_k01_trace_id", default="")
 _TRACE_PATTERN = re.compile(r"[A-Za-z0-9._:-]{1,64}")
 
+# Which HTTP stack served the current request; surfaces in transport diagnostics so a
+# fallback retry is visible in probe.jsonl instead of silently masquerading as urllib.
+_TRANSPORT = contextvars.ContextVar("soar_k01_transport", default="urllib")
+
+# Some K01 gateways ask for a TLS renegotiation after the request body is written.
+# OpenSSL 3.x clients (Python 3.11 ssl) refuse it and the server drops the socket, while
+# the OS stack (Windows schannel via curl.exe) completes it. When the plain socket dies
+# mid-request we retry once over the OS stack instead of failing the whole query.
+CURL_FALLBACK_ENV = "SOAR_K01_CURL_FALLBACK"
+CURL_TIMEOUT_PAD_SECONDS = 5.0
+_RENEGOTIATION_ERRORS = (
+    http.client.RemoteDisconnected,
+    ConnectionResetError,
+    ConnectionAbortedError,
+    BrokenPipeError,
+    ssl.SSLEOFError,
+)
+
 # Actionable hints keyed by transport diagnostic code; appended to the caller-facing
 # message so the userscript log alone is enough to tell the failure classes apart.
 _TRANSPORT_HINTS = {
@@ -62,7 +83,7 @@ _TRANSPORT_HINTS = {
     "network_unreachable":
         "（网络不可达：本机与 K01 网段之间没有路由。）",
     "connection_reset":
-        "（连接被重置：可能有中间安全设备阻断或对端主动断开。）",
+        "（连接被重置：对端在收到请求后断开，可能是中间安全设备阻断，或服务端要求 TLS 重协商而 OpenSSL 客户端无法完成；已尝试系统 TLS 栈重试。）",
     "ca_file_error":
         "（CA 文件不可用：请检查 CA 路径、读取权限与证书格式。）",
     "tls_context_error":
@@ -429,7 +450,8 @@ def _reply_response_detail(response, config, bearer, elapsed_ms):
         location = str(headers.get("Location", "") or "")
     except Exception:
         pass
-    detail = {"httpStatus": getattr(response, "code", None), "elapsedMs": elapsed_ms}
+    detail = {"httpStatus": getattr(response, "code", None), "elapsedMs": elapsed_ms,
+              "transport": _TRANSPORT.get()}
     if content_type:
         detail["contentType"] = content_type
     if location:
@@ -466,6 +488,7 @@ def _transport_error(code, message, status, cause, config, bearer, request_start
     error.diagnostic = {"requestPath": path, "elapsedMs": elapsed_ms,
                         "timeoutMs": config.timeout_ms,
                         "verifyTLS": config.verify_tls,
+                        "transport": _TRANSPORT.get(),
                         "caFileConfigured": bool(config.ca_file), **diagnostic}
     return error
 
@@ -488,12 +511,148 @@ def _with_reply(error, reply):
     return error
 
 
+def _curl_fallback_enabled():
+    return os.environ.get(CURL_FALLBACK_ENV, "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _curl_binary():
+    for name in ("curl.exe", "curl"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return ""
+
+
+def _is_renegotiation_drop(error):
+    """True when the socket died after the request was written (renegotiation refusal)."""
+    pending = [error]
+    for _ in range(4):
+        if not pending:
+            break
+        current = pending.pop(0)
+        if isinstance(current, _RENEGOTIATION_ERRORS):
+            return True
+        text = str(current).lower()
+        if "renegotiat" in text:
+            return True
+        if isinstance(current, ssl.SSLError) and "eof" in text:
+            return True
+        for attr in ("reason", "__cause__", "__context__"):
+            nested = getattr(current, attr, None)
+            if isinstance(nested, BaseException):
+                pending.append(nested)
+    return False
+
+
+class _CurlReply:
+    """Response stand-in so the curl path reuses the urllib body handling."""
+
+    def __init__(self, code, headers, body):
+        self.code = code
+        self.headers = headers
+        self._body = body
+        self._offset = 0
+
+    def read(self, amount=None):
+        if amount is None or amount < 0:
+            chunk = self._body[self._offset:]
+        else:
+            chunk = self._body[self._offset:self._offset + amount]
+        self._offset += len(chunk)
+        return chunk
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+
+def _curl_command(binary, config, path, header_file, payload_file, header_out, body_out):
+    limit = "{:.3f}".format(config.timeout_ms / 1000)
+    command = [binary, "-sS", "--http1.1", "--no-progress-meter",
+               "--max-time", limit, "--connect-timeout", limit,
+               "-X", "POST", config.base_url + path,
+               "-H", "@" + header_file,
+               "--data-binary", "@" + payload_file,
+               "-D", header_out, "-o", body_out,
+               "-w", "%{http_code}"]
+    if not config.verify_tls:
+        command.append("-k")
+    elif config.ca_file:
+        command.extend(["--cacert", config.ca_file])
+    return command
+
+
+def _curl_headers(raw):
+    headers = {}
+    for line in raw.replace("\r\n", "\n").split("\n"):
+        if ":" not in line:
+            continue
+        name, value = line.split(":", 1)
+        name = name.strip()
+        if not name or name.upper().startswith("HTTP/"):
+            continue
+        headers[name] = value.strip()
+        headers.setdefault(name.lower(), value.strip())
+    return headers
+
+
+def _post_with_os_tls(config, path, payload_bytes, bearer):
+    """Retry the request through curl so the OS TLS stack can renegotiate.
+
+    Credentials never reach the process command line: headers and body are handed over
+    through owner-only temp files that are deleted before returning.
+    """
+    binary = _curl_binary()
+    if not binary:
+        raise OSError(errno.ECONNRESET, "curl fallback unavailable")
+    workdir = tempfile.mkdtemp(prefix="k01-os-tls-")
+    try:
+        header_file = os.path.join(workdir, "request.headers")
+        payload_file = os.path.join(workdir, "request.body")
+        header_out = os.path.join(workdir, "response.headers")
+        body_out = os.path.join(workdir, "response.body")
+        lines = ["Accept: application/json",
+                 "Content-Type: application/json; charset=utf-8"]
+        if bearer:
+            lines.append("Authorization: Bearer " + bearer)
+        for name, content in ((header_file, ("\n".join(lines) + "\n").encode("utf-8")),
+                              (payload_file, payload_bytes),
+                              (header_out, b""),
+                              (body_out, b"")):
+            with open(name, "wb") as handle:
+                handle.write(content)
+            os.chmod(name, 0o600)
+        completed = subprocess.run(
+            _curl_command(binary, config, path, header_file, payload_file, header_out, body_out),
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=config.timeout_ms / 1000 + CURL_TIMEOUT_PAD_SECONDS, check=False)
+        status = 0
+        produced = completed.stdout.decode("ascii", "replace").strip().splitlines()
+        if produced and produced[-1].strip().isdigit():
+            status = int(produced[-1].strip())
+        if status <= 0:
+            stderr = completed.stderr.decode("utf-8", "replace").strip()
+            raise OSError(errno.ECONNRESET,
+                          "os tls retry failed (curl exit {0}): {1}".format(
+                              completed.returncode, stderr[:160]))
+        with open(header_out, "rb") as handle:
+            headers = _curl_headers(handle.read(65536).decode("latin-1", "replace"))
+        with open(body_out, "rb") as handle:
+            body = handle.read(MAX_RESPONSE_BYTES + 1)
+        return _CurlReply(status, headers, body)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 def _blocking_post(config, path, payload, bearer, *, stage=None):
     if path not in {LOGIN_PATH, TRACE_PATH}:
         raise ValueError("undocumented K01 endpoint")
     stage = stage or ("login" if path == LOGIN_PATH else "trace")
     started = time.monotonic()
     request_started = False
+    _TRANSPORT.set("urllib")
     try:
         context = _tls_context(config)
         opener = build_opener(ProxyHandler({}), HTTPSHandler(context=context), NoRedirect())
@@ -508,6 +667,14 @@ def _blocking_post(config, path, payload, bearer, *, stage=None):
             response = opener.open(request, timeout=config.timeout_ms / 1000)
         except HTTPError as exc:
             response = exc
+        except (URLError, OSError) as exc:
+            # The gateway asked to renegotiate and OpenSSL refused, so the socket died
+            # after the body was written. Replay once over the OS TLS stack.
+            if not (_is_renegotiation_drop(exc) and _curl_fallback_enabled()
+                    and _curl_binary()):
+                raise
+            _TRANSPORT.set("os-tls")
+            response = _post_with_os_tls(config, path, request.data, bearer)
         with response:
             status = response.code
             elapsed_ms = round((time.monotonic() - started) * 1000)

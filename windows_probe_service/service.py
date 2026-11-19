@@ -42,7 +42,7 @@ from k01_intelligence import (K01IntelligenceClient, K01Error, new_trace_id, nor
 import windows_icmp
 
 API_VERSION = 1
-SERVICE_VERSION = "1.6.0"
+SERVICE_VERSION = "1.6.1"
 MAX_DNS_ADDRESSES = 64
 DNS_RESOLVER_SEQUENCE = ("system", *DEFAULT_DNS_SERVERS)
 DOMAIN_DEFAULT_PORTS = (80, 443)

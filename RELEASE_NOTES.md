@@ -1,3 +1,15 @@
+# SOARProbe v1.6.1
+
+修复 K01 情报登录在要求 TLS 重协商的网关后 31 ms 断连的问题，情报查询可正常返回。
+
+- 服务端在收到请求体后发起 TLS 重协商时，OpenSSL 3.x 客户端（CPython 3.11 自带）无法完成，对端随即断开，表现为 `K01_CONNECTION_ERROR`、`stage=login`、`diagnosticCode=socket_error`，且与证书、超时和 UA 无关。
+- 服务识别这类请求后断连（`RemoteDisconnected`、连接重置、`BrokenPipe`、`SSLEOF` 及含 renegotiation 的错误），改用系统 TLS 栈重放同一请求一次；Windows 上即 schannel，通过系统自带 `curl.exe` 完成重协商后正常拿到响应。超时、连接被拒、证书错误不进入该重放，错误码语义不变。
+- 重放时请求头与请求体经仅本进程可读的临时文件传递，令牌与密码不进入命令行，调用结束立即删除临时目录。重放结果复用原有 JSON 校验、大小上限与错误页取证逻辑。
+- 诊断新增 `diagnostic.transport`，取值 `urllib` 或 `os-tls`，可直接在 `probe.jsonl` 与错误 payload 中确认本次是否走了系统 TLS 栈；重放失败时 `osError` 保留 curl 退出码与摘要。
+- 需要时可设置环境变量 `SOAR_K01_CURL_FALLBACK=0` 关闭该重放。173 项离线测试覆盖断连识别、重放触发、关闭开关后的错误码、命令行不含密钥与响应解析。
+
+**推荐下载 `SOARProbe-Windows-x64-portable.zip`。** 关闭旧服务，将 ZIP 完整解压到新目录，双击 `SOARProbe\Start-SOARProbe.cmd`，保留 `_internal` 及其他文件。也提供单文件 `SOARProbe.exe` 与 `SOARProbe-Windows-x64.zip`。Windows x64 无需安装 Python、依赖或 Telnet 客户端。
+
 # SOARProbe v1.6.0
 
 新增 K01 威胁情报查询链路与端到端 trace 诊断。此版本首次把 K01 情报接口、登录会话兜底与 32 位十六进制 traceId 带到 Windows 构建产物。

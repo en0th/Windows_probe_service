@@ -607,5 +607,112 @@ class HttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.app.state.engine.jobs)
 
 
+class OsTlsFallbackTests(unittest.TestCase):
+    """A gateway that requests renegotiation is replayed over the OS TLS stack."""
+
+    def setUp(self):
+        patcher = patch.dict("os.environ", {k01.CURL_FALLBACK_ENV: "1"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_renegotiation_drop_is_recognised(self):
+        import http.client
+        self.assertTrue(k01._is_renegotiation_drop(URLError(http.client.RemoteDisconnected(
+            "Remote end closed connection without response"))))
+        self.assertTrue(k01._is_renegotiation_drop(URLError(ConnectionResetError(10054, "reset"))))
+        self.assertTrue(k01._is_renegotiation_drop(URLError(ssl.SSLError("renegotiation refused"))))
+        self.assertFalse(k01._is_renegotiation_drop(URLError(ConnectionRefusedError(61, "refused"))))
+        self.assertFalse(k01._is_renegotiation_drop(TimeoutError("slow")))
+
+    def test_renegotiation_drop_is_replayed_once_over_os_tls(self):
+        import http.client
+        reply = k01._CurlReply(200, {"Content-Type": "application/json"},
+                               b'{"access_token": "os-tls"}')
+        with patch.object(k01, "build_opener") as build, \
+                patch.object(k01, "_curl_binary", return_value="/usr/bin/curl"), \
+                patch.object(k01, "_post_with_os_tls", return_value=reply) as retried:
+            build.return_value.open.side_effect = URLError(http.client.RemoteDisconnected(
+                "Remote end closed connection without response"))
+            answer = k01._blocking_post(k01.config_from_payload(CONFIG), k01.LOGIN_PATH,
+                                        {}, None)
+        self.assertEqual(answer.status, 200)
+        self.assertEqual(answer.data["access_token"], "os-tls")
+        self.assertEqual(retried.call_count, 1)
+        self.assertEqual(k01._TRANSPORT.get(), "os-tls")
+
+    def test_fallback_can_be_disabled_and_then_reports_connection_error(self):
+        import http.client
+        with patch.object(k01, "build_opener") as build, \
+                patch.object(k01, "_curl_binary", return_value="/usr/bin/curl"), \
+                patch.dict("os.environ", {k01.CURL_FALLBACK_ENV: "0"}):
+            build.return_value.open.side_effect = URLError(ConnectionResetError(10054, PASSWORD))
+            with self.assertRaises(k01.K01Error) as raised:
+                k01._blocking_post(k01.config_from_payload(CONFIG), k01.LOGIN_PATH, {}, None)
+        payload = raised.exception.payload()
+        self.assertEqual(payload["code"], "K01_CONNECTION_ERROR")
+        self.assertEqual(payload["diagnostic"]["transport"], "urllib")
+        self.assertNotIn(PASSWORD, json.dumps(payload))
+
+    def test_failed_os_tls_retry_reports_the_transport_it_used(self):
+        import http.client
+        with patch.object(k01, "build_opener") as build, \
+                patch.object(k01, "_curl_binary", return_value="/usr/bin/curl"), \
+                patch.object(k01, "_post_with_os_tls",
+                             side_effect=OSError(104, "os tls retry failed (curl exit 7)")):
+            build.return_value.open.side_effect = URLError(http.client.RemoteDisconnected("closed"))
+            with self.assertRaises(k01.K01Error) as raised:
+                k01._blocking_post(k01.config_from_payload(CONFIG), k01.LOGIN_PATH, {}, None)
+        payload = raised.exception.payload()
+        self.assertEqual(payload["code"], "K01_CONNECTION_ERROR")
+        self.assertEqual(payload["diagnostic"]["transport"], "os-tls")
+        self.assertIn("curl exit 7", payload["diagnostic"]["osError"])
+
+    def test_curl_command_keeps_credentials_out_of_argv_and_honours_tls_flags(self):
+        import subprocess
+        config = k01.config_from_payload(CONFIG)
+        command = k01._curl_command("curl.exe", config, k01.LOGIN_PATH, "h.txt", "p.json", "rh", "rb")
+        self.assertNotIn(PASSWORD, " ".join(command))
+        self.assertIn("--http1.1", command)
+        self.assertNotIn("-k", command)
+        insecure = k01._curl_command("curl.exe", k01.config_from_payload(dict(CONFIG, verifyTLS=False)),
+                                     k01.LOGIN_PATH, "h.txt", "p.json", "rh", "rb")
+        self.assertIn("-k", insecure)
+        trusted = k01._curl_command("curl.exe", k01.config_from_payload(dict(CONFIG, caFile="/tmp/ca.pem")),
+                                    k01.LOGIN_PATH, "h.txt", "p.json", "rh", "rb")
+        self.assertEqual(trusted[trusted.index("--cacert") + 1], "/tmp/ca.pem")
+
+    def test_os_tls_retry_sends_headers_through_a_private_file(self):
+        import subprocess
+        seen = {}
+
+        def fake_run(command, **kwargs):
+            seen["command"] = command
+            header_arg = command[command.index("-H") + 1]
+            body_arg = command[command.index("--data-binary") + 1]
+            seen["headers"] = Path(header_arg.lstrip("@")).read_text(encoding="utf-8")
+            seen["body"] = Path(body_arg.lstrip("@")).read_bytes()
+            header_out = command[command.index("-D") + 1]
+            body_out = command[command.index("-o") + 1]
+            Path(header_out).write_text("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n", encoding="latin-1")
+            Path(body_out).write_bytes(b'{"success": true}')
+            return subprocess.CompletedProcess(command, 0, b"200", b"")
+
+        with patch.object(k01, "_curl_binary", return_value="curl.exe"), \
+                patch.object(k01.subprocess, "run", side_effect=fake_run):
+            reply = k01._post_with_os_tls(k01.config_from_payload(CONFIG), k01.LOGIN_PATH,
+                                          json.dumps({"password": PASSWORD}).encode("utf-8"), ACCESS)
+        self.assertEqual(reply.code, 200)
+        self.assertEqual(reply.headers.get("Content-Type"), "application/json")
+        self.assertEqual(reply.read(), b'{"success": true}')
+        self.assertIn("Authorization: Bearer " + ACCESS, seen["headers"])
+        self.assertNotIn(ACCESS, " ".join(seen["command"]))
+        self.assertIn(PASSWORD.encode("utf-8"), seen["body"])
+
+    def test_curl_header_block_parsing_ignores_status_lines(self):
+        headers = k01._curl_headers("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n")
+        self.assertEqual(headers.get("Content-Type"), "application/json")
+        self.assertNotIn("HTTP/1.1 200 OK", headers)
+
+
 if __name__ == "__main__":
     unittest.main()
