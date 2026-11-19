@@ -1,3 +1,10 @@
+# SOARProbe v1.6.9
+
+- **Ping/Telnet 改为固定次数采样并返回逐次记录**：配置 `pingCount:5` 时每个 IPv4 固定执行 5 次 ICMP Echo，不再在第一次成功后提前停止；`tcpAttempts:3` 时每个端口固定连接 3 次。任一 Ping 成功或任一 TCP 连接成功即判定目标连通。
+- Ping/TCP 结果新增 `attempts`、`configuredAttempts`、`successCount` 和 `attemptDetails`。前端脚本 v25.10 会逐条显示“第 N 次”的结果、耗时和错误，因此不会再只看到一条汇总记录。
+- 所有尝试仍分别经过全局限流和超时控制，参数继续参与缓存、共享任务和 inflight 隔离。
+- 工作台脚本升级到 v25.10；Windows probe 升级到 v1.6.9。
+
 # SOARProbe v1.6.8
 
 - **Ping/Telnet 重试和超时可配置**：默认每个 IPv4 Ping 最多 5 次、每个 TCP 端口最多连接 3 次、单次操作超时 3000 ms。Ping 成功即停止；TCP 成功或明确拒绝即停止，只有超时/错误才继续重试。

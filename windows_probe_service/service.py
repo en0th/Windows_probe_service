@@ -45,7 +45,7 @@ from k01_intelligence import (K01IntelligenceClient, K01Error, new_trace_id, nor
 import windows_icmp
 
 API_VERSION = 1
-SERVICE_VERSION = "1.6.8"
+SERVICE_VERSION = "1.6.9"
 # K01 payloads are stamped with this build so the userscript log names the exe that answered.
 set_service_version(SERVICE_VERSION)
 MAX_DNS_ADDRESSES = 64
@@ -602,41 +602,50 @@ class ProbeEngine:
     async def _ping_with_retries(self, address, count, should_continue):
         started = time.monotonic()
         attempts = []
+        # A configured Ping count is a fixed sample count, not a "retry until
+        # success" count: always perform every echo request so the UI can show
+        # the full history and any packet loss. Any successful reply still makes
+        # the aggregate result reachable.
         for attempt in range(1, count + 1):
             result = await self._io(lambda: self._ping(address), should_continue)
             attempts.append({"attempt": attempt, "status": result.get("status"),
                              "elapsedMs": result.get("elapsedMs", 0),
                              **({"roundTripMs": result["roundTripMs"]} if "roundTripMs" in result else {}),
                              **({"error": result["error"]} if "error" in result else {})})
-            if result.get("status") == "reachable":
-                break
+        successes = [item for item in attempts if item.get("status") == "reachable"]
         last = attempts[-1]
-        result = {"address": address, "status": last.get("status", "error"),
+        status = "reachable" if successes else last.get("status", "error")
+        result = {"address": address, "status": status,
                   "attempts": len(attempts), "configuredAttempts": count,
+                  "successCount": len(successes),
+                  "attemptDetails": attempts,
                   "elapsedMs": round((time.monotonic() - started) * 1000)}
-        if "roundTripMs" in last:
-            result["roundTripMs"] = last["roundTripMs"]
-        if "error" in last and last["status"] != "reachable":
+        if successes and "roundTripMs" in successes[0]:
+            result["roundTripMs"] = successes[0]["roundTripMs"]
+        if not successes and "error" in last:
             result["error"] = last["error"]
         return result
 
     async def _tcp_with_retries(self, address, port, count, should_continue):
         started = time.monotonic()
         attempts = []
+        # Keep the complete TCP attempt history as well. Open is the strongest
+        # positive outcome; refused is definitive when no attempt opened.
         for attempt in range(1, count + 1):
             result = await self._io(lambda: self._tcp(address, port), should_continue)
             attempts.append({"attempt": attempt, "status": result.get("status"),
                              "elapsedMs": result.get("elapsedMs", 0),
                              **({"error": result["error"]} if "error" in result else {})})
-            # Open and refused are definitive outcomes; only timeout/error is worth retrying.
-            if result.get("status") in {"open", "refused"}:
-                break
-        last = attempts[-1]
-        result = {"address": address, "port": port, "status": last.get("status", "error"),
+        statuses = [item.get("status") for item in attempts]
+        status = ("open" if "open" in statuses else
+                  "refused" if "refused" in statuses else attempts[-1].get("status", "error"))
+        result = {"address": address, "port": port, "status": status,
                   "attempts": len(attempts), "configuredAttempts": count,
+                  "successCount": statuses.count("open"),
+                  "attemptDetails": attempts,
                   "elapsedMs": round((time.monotonic() - started) * 1000)}
-        if "error" in last and last["status"] not in {"open", "refused"}:
-            result["error"] = last["error"]
+        if status not in {"open", "refused"} and "error" in attempts[-1]:
+            result["error"] = attempts[-1]["error"]
         return result
 
     async def probe(self, host, port, should_continue=None, excluded_hosts=(), excluded_cidrs=(),

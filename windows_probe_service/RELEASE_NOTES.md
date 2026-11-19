@@ -1,8 +1,15 @@
 # 发布说明
 
+## v1.6.9
+
+- **Ping/Telnet 改为固定次数采样并返回逐次记录**：配置 `pingCount:5` 时每个 IPv4 固定执行 5 次 ICMP Echo，不再在第一次成功后提前停止；`tcpAttempts:3` 时每个端口固定连接 3 次。任一 Ping 成功或任一 TCP 连接成功即判定目标连通。
+- Ping/TCP 结果新增 `attempts`、`configuredAttempts`、`successCount` 和 `attemptDetails`。前端脚本 v25.10 会逐条显示“第 N 次”的结果、耗时和错误，因此不会再只看到一条汇总记录。
+- 所有尝试仍分别经过全局限流和超时控制，参数继续参与缓存、共享任务和 inflight 隔离。
+- 工作台脚本升级到 v25.10；Windows probe 升级到 v1.6.9。
+
 ## v1.6.8
 
-- **Ping/Telnet 重试和超时可配置**：默认每个 IPv4 Ping 最多 5 次、每个 TCP 端口最多连接 3 次、单次操作超时 3000 ms。Ping 成功即停止；TCP 成功或明确拒绝即停止，只有超时/错误才继续重试。
+- **Ping/Telnet 次数和超时可配置**：默认每个 IPv4 Ping 5 次、每个 TCP 端口连接 3 次、单次操作超时 3000 ms。
 - `/v1/probes` 新增可选字段 `pingCount`（1–10）、`tcpAttempts`（1–10）、`timeoutMs`（200–10000），省略时使用上述默认值。字段参与缓存和共享任务隔离，避免不同探测参数复用旧结果；结果中的 `attempts` 和 `configuredAttempts` 可直接查看实际次数。
 - `/health` 新增 `probeSettings: true`、`defaultPingCount: 5`、`defaultTcpAttempts: 3`、`defaultProbeTimeoutMs: 3000`。
 - 工作台脚本 v25.9：网络探测配置可设置 Ping 次数、Telnet 次数和单次超时；DNS 场景新增百度 `180.76.76.76`、阿里 `223.5.5.5/223.6.6.6`，并保留默认、仅系统 DNS 和自定义。

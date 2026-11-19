@@ -159,7 +159,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.engine._resolve = AsyncMock(return_value=(["10.1.2.3", "104.16.1.2", "8.8.8.8", PUBLIC], []))
         self.engine._ping = AsyncMock(return_value={"address": PUBLIC, "status": "reachable"})
         self.engine._tcp = AsyncMock(return_value={"address": PUBLIC, "port": 443, "status": "open"})
-        result = await self.engine.probe("origin.example.invalid", 443)
+        result = await self.engine.probe("origin.example.invalid", 443, ping_count=1, tcp_attempts=1)
         self.engine._ping.assert_awaited_once_with(PUBLIC)
         self.engine._tcp.assert_awaited_once_with(PUBLIC, 443)
         self.assertEqual([x["status"] for x in result["ping"]], ["skipped_private", "skipped_cdn", "skipped_dns", "reachable"])
@@ -184,7 +184,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.engine._resolve = AsyncMock(return_value=([PUBLIC, OTHER], []))
         self.engine._ping = AsyncMock(return_value={"address": OTHER, "status": "reachable"})
         self.engine._tcp = AsyncMock(return_value={"address": OTHER, "port": 443, "status": "open"})
-        result = await self.engine.probe("origin.example.invalid", 443, excluded_hosts=(PUBLIC,))
+        result = await self.engine.probe("origin.example.invalid", 443, excluded_hosts=(PUBLIC,), ping_count=1, tcp_attempts=1)
         self.assertEqual(result["ping"][0]["status"], "skipped_custom")
         self.engine._ping.assert_awaited_once_with(OTHER)
         self.engine._tcp.assert_awaited_once_with(OTHER, 443)
@@ -209,26 +209,31 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.engine._resolve = AsyncMock(return_value=([PUBLIC, OTHER], []))
         self.engine._ping = AsyncMock(return_value={"address": OTHER, "status": "reachable"})
         self.engine._tcp = AsyncMock(return_value={"address": OTHER, "port": 443, "status": "open"})
-        result = await self.engine.probe("origin.example.invalid", 443, excluded_cidrs=("93.184.216.0/24",))
+        result = await self.engine.probe("origin.example.invalid", 443, excluded_cidrs=("93.184.216.0/24",), ping_count=1, tcp_attempts=1)
         self.assertEqual(result["ping"][0]["status"], "skipped_custom")
         self.assertEqual(result["tcp"][0]["source"], "request.excludedCidrs")
         self.assertEqual(result["tcp"][0]["rule"], "93.184.216.0/24")
         self.engine._ping.assert_awaited_once_with(OTHER)
         self.engine._tcp.assert_awaited_once_with(OTHER, 443)
 
-    async def test_ping_retries_configured_count_until_reachable(self):
+    async def test_ping_always_collects_configured_sample_records(self):
         self.engine._ping = AsyncMock(side_effect=[
             {"address": PUBLIC, "status": "timeout", "elapsedMs": 10},
             {"address": PUBLIC, "status": "unreachable", "elapsedMs": 11},
             {"address": PUBLIC, "status": "reachable", "roundTripMs": 2, "elapsedMs": 12},
+            {"address": PUBLIC, "status": "reachable", "roundTripMs": 3, "elapsedMs": 13},
+            {"address": PUBLIC, "status": "timeout", "elapsedMs": 14},
         ])
         self.engine._tcp = AsyncMock(return_value={"address": PUBLIC, "port": 443, "status": "open"})
-        result = await self.engine.probe(PUBLIC, 443, ping_count=5, tcp_attempts=3, timeout_ms=1234)
-        self.assertEqual(self.engine._ping.await_count, 3)
-        self.assertEqual(result["ping"][0]["status"], "reachable")
-        self.assertEqual(result["ping"][0]["attempts"], 3)
-        self.assertEqual(result["ping"][0]["configuredAttempts"], 5)
-        self.assertEqual(result["ping"][0]["roundTripMs"], 2)
+        result = await self.engine.probe(PUBLIC, 443, ping_count=5, tcp_attempts=1, timeout_ms=1234)
+        ping = result["ping"][0]
+        self.assertEqual(self.engine._ping.await_count, 5)
+        self.assertEqual(ping["status"], "reachable")
+        self.assertEqual(ping["attempts"], 5)
+        self.assertEqual(ping["configuredAttempts"], 5)
+        self.assertEqual(ping["successCount"], 2)
+        self.assertEqual(ping["roundTripMs"], 2)
+        self.assertEqual([item["attempt"] for item in ping["attemptDetails"]], [1, 2, 3, 4, 5])
 
     async def test_tcp_retries_timeouts_until_open_and_uses_request_timeout(self):
         seen_timeouts = []
@@ -246,7 +251,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["tcp"][0]["status"], "open")
         self.assertEqual(result["tcp"][0]["attempts"], 3)
         self.assertEqual(result["tcp"][0]["configuredAttempts"], 3)
-        self.assertEqual(seen_timeouts, [1234])
+        self.assertEqual(seen_timeouts, [1234] * 5)
         self.assertIsNone(service._PROBE_TIMEOUT_MS.get())
 
     async def test_known_port_tcp_attempted_even_when_ping_has_no_response(self):
@@ -254,7 +259,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(status=status):
                 self.engine._ping = AsyncMock(return_value={"address": PUBLIC, "status": status})
                 self.engine._tcp = AsyncMock(return_value={"address": PUBLIC, "port": 443, "status": "open"})
-                result = await self.engine.probe(PUBLIC, 443)
+                result = await self.engine.probe(PUBLIC, 443, ping_count=1, tcp_attempts=1)
                 self.engine._tcp.assert_awaited_once_with(PUBLIC, 443)
                 self.assertEqual(result["tcp"][0]["status"], "open")
 

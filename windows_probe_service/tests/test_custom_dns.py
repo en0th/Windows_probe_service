@@ -97,7 +97,7 @@ class CustomDnsTests(unittest.IsolatedAsyncioTestCase):
         outcomes = {"system": service.dns.resolver.NoAnswer(), ENTERPRISE: service.dns.resolver.NXDOMAIN(),
                     CUSTOM: ([PUBLIC], DOMAIN)}
         with self.use_resolvers(outcomes, calls):
-            result = await self.engine.probe(DOMAIN, None, dns_servers=(ENTERPRISE, CUSTOM, OTHER))
+            result = await self.engine.probe(DOMAIN, None, dns_servers=(ENTERPRISE, CUSTOM, OTHER), ping_count=1, tcp_attempts=1)
         self.assertEqual([item["server"] for item in calls], ["system", ENTERPRISE, CUSTOM])
         self.assertEqual([item["server"] for item in result["nslookup"]["attempts"]], ["system", ENTERPRISE, CUSTOM])
         self.assertEqual(result["nslookup"]["resolver"], CUSTOM)
@@ -135,7 +135,7 @@ class CustomDnsTests(unittest.IsolatedAsyncioTestCase):
         calls = []
         self.successful_probes()
         with self.use_resolvers({"system": ([PUBLIC, OTHER], DOMAIN)}, calls):
-            result = await self.engine.probe(DOMAIN, 443, dns_servers=(PUBLIC,))
+            result = await self.engine.probe(DOMAIN, 443, dns_servers=(PUBLIC,), ping_count=1, tcp_attempts=1)
         self.assertEqual([item["status"] for item in result["ping"]], ["skipped_dns", "reachable"])
         self.engine._ping.assert_awaited_once_with(OTHER)
         self.engine._tcp.assert_awaited_once_with(OTHER, 443)

@@ -58,7 +58,7 @@ class DnsFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.real_lookup(); self.successful_probes()
         self.engine.io_limit = asyncio.Semaphore(1)
         with patch.object(service.dns.asyncresolver, "Resolver", side_effect=self.resolver_factory(outcomes, calls)):
-            result = await asyncio.wait_for(self.engine.probe(DOMAIN, None), 1)
+            result = await asyncio.wait_for(self.engine.probe(DOMAIN, None, ping_count=1, tcp_attempts=1), 1)
         self.assertEqual([call["server"] for call in calls], ["system", "8.8.8.8"])
         self.assertTrue(all(call["type"] == "A" and call["search"] is False for call in calls))
         self.assertEqual(result["nslookup"]["resolver"], "8.8.8.8")
@@ -73,7 +73,7 @@ class DnsFallbackTests(unittest.IsolatedAsyncioTestCase):
         outcomes = {"system": ([], DOMAIN), "8.8.8.8": service.dns.resolver.NoNameservers(), "223.5.5.5": ([PUBLIC], DOMAIN)}
         self.real_lookup(); self.successful_probes()
         with patch.object(service.dns.asyncresolver, "Resolver", side_effect=self.resolver_factory(outcomes, calls)):
-            result = await self.engine.probe(DOMAIN, 8443)
+            result = await self.engine.probe(DOMAIN, 8443, ping_count=1, tcp_attempts=1)
         self.assertEqual([call["server"] for call in calls], list(service.DNS_RESOLVER_SEQUENCE))
         self.assertEqual(result["nslookup"]["resolver"], "223.5.5.5")
         self.assertEqual([attempt.get("error") for attempt in result["nslookup"]["attempts"]], ["dns_nodata", "dns_server_failure", None])
@@ -143,7 +143,7 @@ class DnsFallbackTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_literal_ip_without_port_remains_ping_only_and_never_uses_dns_fallback(self):
         self.engine._ping = AsyncMock(return_value={"address": PUBLIC, "status": "reachable"})
-        result = await self.engine.probe(PUBLIC, None)
+        result = await self.engine.probe(PUBLIC, None, ping_count=1, tcp_attempts=1)
         self.engine._resolve.assert_not_called(); self.engine._tcp.assert_not_called()
         self.engine._ping.assert_awaited_once_with(PUBLIC)
         self.assertEqual(result["nslookup"]["status"], "not_applicable")

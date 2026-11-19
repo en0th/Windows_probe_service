@@ -46,7 +46,7 @@ class DnsEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.engine._resolve = AsyncMock(return_value=(addresses, ["canonical.example.invalid"]))
         self.engine._ping = AsyncMock(side_effect=lambda ip: {"address": ip, "status": "reachable"})
         self.engine._tcp = AsyncMock(side_effect=lambda ip, port: {"address": ip, "port": port, "status": "open"})
-        result = await self.engine.probe(DOMAIN, 443)
+        result = await self.engine.probe(DOMAIN, 443, ping_count=1, tcp_attempts=1)
         self.engine._resolve.assert_awaited_once_with(DOMAIN, should_continue=None, dns_servers=service.DEFAULT_DNS_SERVERS)
         self.assertEqual([call.args for call in self.engine._ping.await_args_list], [(PUBLIC,), (OTHER,)])
         self.assertEqual([call.args for call in self.engine._tcp.await_args_list], [(PUBLIC, 443), (OTHER, 443)])
@@ -62,7 +62,7 @@ class DnsEvidenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_literal_ipv4_port_connects_even_when_ping_times_out_without_a_dns_query(self):
         self.engine._ping = AsyncMock(return_value={"address": PUBLIC, "status": "timeout"})
         self.engine._tcp = AsyncMock(return_value={"address": PUBLIC, "port": 8443, "status": "open"})
-        result = await self.engine.probe(PUBLIC, 8443)
+        result = await self.engine.probe(PUBLIC, 8443, ping_count=1, tcp_attempts=1)
         self.engine._resolve.assert_not_called()
         self.engine._tcp.assert_awaited_once_with(PUBLIC, 8443)
         self.assertEqual(result["nslookup"]["status"], "not_applicable")
