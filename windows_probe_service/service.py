@@ -36,10 +36,13 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from network_policy import NetworkPolicy
 from probe_models import DEFAULT_DNS_SERVERS, MAX_TARGETS, ProbeBatch, ProbeTarget, ValidationError, normalize_host
+from k01_intelligence import (K01IntelligenceClient, K01Error, new_trace_id, normalize_trace_id,
+                              reset_trace_id, set_trace_id,
+                              config_from_payload as k01_config_from_payload)
 import windows_icmp
 
 API_VERSION = 1
-SERVICE_VERSION = "1.4.0"
+SERVICE_VERSION = "1.6.0"
 MAX_DNS_ADDRESSES = 64
 DNS_RESOLVER_SEQUENCE = ("system", *DEFAULT_DNS_SERVERS)
 DOMAIN_DEFAULT_PORTS = (80, 443)
@@ -88,6 +91,7 @@ def run_self_test() -> dict:
         python_runtime = Path(sys.executable).resolve()
     for module in ("uvicorn.protocols.http.h11_impl", "uvicorn.lifespan.on", "uvicorn.loops.asyncio", "dns._asyncio_backend", "anyio._backends._asyncio"):
         importlib.import_module(module)
+    k01_config_from_payload({"baseUrl": "https://k01.example.invalid", "verifyTLS": True})
     policy = NetworkPolicy(resource_path("cdn_rules.json"))
     if not resource_path("LICENSE.cdncheck.md").is_file() or not policy.cidrs or not policy.domains:
         raise RuntimeError("bundled CDN data or license missing")
@@ -101,6 +105,7 @@ def run_self_test() -> dict:
             "apiVersion": API_VERSION, "frozen": frozen, "bundleLayout": bundle_layout,
             "httpStack": "starlette", "validationImplementation": "python",
             "pydanticCoreBundled": False,
+            "k01Intelligence": True,
             "customDnsServers": True, "dnsServers": list(DEFAULT_DNS_SERVERS),
             "nativeDependencies": {"pythonRuntime": str(python_runtime)},
             "ipv4Only": True, "cdnRulesVersion": policy.version,
@@ -352,7 +357,8 @@ class ProbeEngine:
         self.closed = False
         self.workers = [asyncio.create_task(self._worker(), name=f"probe-worker-{i}")
                         for i in range(self.settings.concurrency)]
-        self.log("service_started", apiVersion=API_VERSION, cdnRulesVersion=self.policy.version,
+        self.log("service_started", serviceVersion=SERVICE_VERSION, apiVersion=API_VERSION,
+                 cdnRulesVersion=self.policy.version,
                  concurrency=self.settings.concurrency, timeoutMs=self.settings.timeout_ms)
 
     async def close(self):
@@ -707,7 +713,7 @@ class BodyLimitMiddleware:
         await self.app(scope, replay, send)
 
 
-def create_app(settings=None, policy=None, engine=None, logger=None):
+def create_app(settings=None, policy=None, engine=None, logger=None, intelligence=None):
     settings = settings or load_settings()
     if policy is None:
         policy = NetworkPolicy(resolve_rules_path(settings.data_dir), settings.data_dir / "cdn_custom_rules.json", settings.excluded_cidrs)
@@ -717,6 +723,7 @@ def create_app(settings=None, policy=None, engine=None, logger=None):
             pass
     logger = logger or create_logger(settings)
     engine = engine or ProbeEngine(settings, policy, logger)
+    intelligence = intelligence or K01IntelligenceClient(settings.data_dir, settings.token, logger)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -724,6 +731,7 @@ def create_app(settings=None, policy=None, engine=None, logger=None):
         try:
             yield
         finally:
+            await intelligence.close()
             await engine.close()
             for handler in list(logger.handlers):
                 handler.flush()
@@ -749,6 +757,7 @@ def create_app(settings=None, policy=None, engine=None, logger=None):
                 "safetyExclusions": True, "excludedCidrsSupported": True,
                 "domainNslookup": True, "domainPing": True,
                 "domainDnsFallback": True, "customDnsServers": True, "dnsServers": list(DEFAULT_DNS_SERVERS),
+                "k01Intelligence": True,
                 "domainDefaultPorts": list(DOMAIN_DEFAULT_PORTS),
                 "dnsExcluded": True, "excludedDnsAddresses": len(policy.dns_addresses)})
 
@@ -815,6 +824,86 @@ def create_app(settings=None, policy=None, engine=None, logger=None):
         except KeyError:
             return JSONResponse({"detail": "job_not_found"}, status_code=404)
 
+    def intelligence_error(error, trace_id=""):
+        # The local log is the only forensic trail for an exe-side K01 failure: record the
+        # stage, upstream status and diagnostic code next to the returned error code.
+        if trace_id and not error.trace_id:
+            error.trace_id = trace_id
+        try:
+            intelligence._log("k01-http-error", code=error.code, status=error.status,
+                              reason=error.reason, stage=error.stage,
+                              upstreamStatus=error.upstream_status,
+                              diagnosticCode=error.diagnostic_code, diagnostic=error.diagnostic,
+                              fallbackAllowed=error.fallback,
+                              config=intelligence._config_forensics())
+        except Exception:
+            pass
+        response = JSONResponse(error.payload(), status_code=error.status)
+        if trace_id:
+            response.headers["X-Trace-Id"] = trace_id
+        return response
+
+    def request_trace_id(request):
+        """Per-request correlation id: client supplied or locally minted, always log safe."""
+        return normalize_trace_id(request.headers.get("x-trace-id", "")) or new_trace_id()
+
+    async def intelligence_payload(request):
+        if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+            raise K01Error("K01_JSON_REQUIRED", "请使用 JSON 请求。", 415)
+        try:
+            return json.loads(await request.body(), parse_constant=reject_constant,
+                              object_pairs_hook=unique_object)
+        except (ValueError, TypeError, RecursionError, UnicodeError):
+            raise K01Error("K01_INVALID_REQUEST", "情报请求格式无效。", 422) from None
+
+    async def intelligence_status(request: Request):
+        denied = authenticate(request)
+        if denied is not None:
+            return denied
+        return JSONResponse(intelligence.status())
+
+    async def intelligence_config(request: Request):
+        denied = authenticate(request)
+        if denied is not None:
+            return denied
+        trace_id = request_trace_id(request)
+        if request.method in {"GET", "HEAD"}:
+            response = JSONResponse(intelligence.public_config())
+            response.headers["X-Trace-Id"] = trace_id
+            return response
+        token = set_trace_id(trace_id)
+        try:
+            payload = await intelligence_payload(request)
+            response = JSONResponse(intelligence.update_config(payload))
+            response.headers["X-Trace-Id"] = trace_id
+            return response
+        except K01Error as error:
+            return intelligence_error(error, trace_id)
+        except (ValueError, TypeError, RecursionError):
+            return intelligence_error(K01Error("K01_INVALID_CONFIG", "请检查 K01 地址、账号和连接设置。", 422), trace_id)
+        except OSError:
+            return intelligence_error(K01Error("K01_CONFIG_SAVE_FAILED", "本地 K01 配置保存失败。", 500), trace_id)
+        finally:
+            reset_trace_id(token)
+
+    async def intelligence_trace(request: Request):
+        denied = authenticate(request)
+        if denied is not None:
+            return denied
+        trace_id = request_trace_id(request)
+        token = set_trace_id(trace_id)
+        try:
+            payload = await intelligence_payload(request)
+            response = JSONResponse(await intelligence.trace(payload))
+            response.headers["X-Trace-Id"] = trace_id
+            return response
+        except K01Error as error:
+            return intelligence_error(error, trace_id)
+        except (ValueError, TypeError, RecursionError):
+            return intelligence_error(K01Error("K01_INVALID_REQUEST", "请输入有效的 IPv4 地址或域名。", 422), trace_id)
+        finally:
+            reset_trace_id(token)
+
     async def http_error(request: Request, error: HTTPException):
         return JSONResponse({"detail": error.detail}, status_code=error.status_code, headers=error.headers)
 
@@ -824,8 +913,12 @@ def create_app(settings=None, policy=None, engine=None, logger=None):
         Route("/v1/probes", submit, methods=["POST"]),
         Route("/v1/probes/{job_id}", results, methods=["GET"]),
         Route("/v1/probes/{job_id}", cancel, methods=["DELETE"]),
+        Route("/v1/intelligence/status", intelligence_status, methods=["GET"]),
+        Route("/v1/intelligence/config", intelligence_config, methods=["GET", "POST", "PUT"]),
+        Route("/v1/intelligence/trace", intelligence_trace, methods=["POST"]),
     ])
     app.state.engine = engine
+    app.state.intelligence = intelligence
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "[::1]"])
     app.add_middleware(BodyLimitMiddleware)
     return app
@@ -875,6 +968,7 @@ def main():
     if os.name != "nt":
         raise SystemExit("This probe service runs on Windows only. Offline tests can run on other platforms.")
     import uvicorn
+    print(f"SOARProbe v{SERVICE_VERSION} (API v{API_VERSION})")
     print(f"SOAR probe: http://127.0.0.1:{settings.port} (Ctrl+C to stop)")
     print(f"Config: {settings.data_dir / 'config.json'}")
     print("[C] Copy pairing token  [L] Open logs  [Q] Quit (or Ctrl+C)")

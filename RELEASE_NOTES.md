@@ -1,3 +1,15 @@
+# SOARProbe v1.6.0
+
+新增 K01 威胁情报查询链路与端到端 trace 诊断。此版本首次把 K01 情报接口、登录会话兜底与 32 位十六进制 traceId 带到 Windows 构建产物。
+
+- 新增 `/v1/intelligence/status`、`/v1/intelligence/config`、`/v1/intelligence/trace` 三组接口，支持情报配置读写与按需 trace 查询；配置中的口令字段只写不读，响应中始终为 `null`。
+- 全链路统一 trace：脚本、`X-Trace-Id` 响应头与服务日志使用同一 32 位 traceId，错误 payload 附带 `stage`、`upstreamStatus`、`diagnosticCode`、`diagnostic`、`traceId`，可直接按 ID 跨层检索。
+- 按阶段区分 `tls`、`upstream`、`transport` 失败，非 200 上游响应回传诊断详情；重定向识别为独立错误码，不再退化为裸失败。
+- 未开启前端会话兜底时 `trace` 返回 409 `K01_FRONTEND_REQUIRED` 并标记 `fallbackAllowed`，便于脚本判断是否切换到页面会话通道。
+- 166 项离线测试覆盖配置校验、trace 诊断、证书与重定向错误分流；Windows 构建额外自检情报接口与健康信息，不对真实告警目标发起探测。
+
+**推荐下载 `SOARProbe-Windows-x64-portable.zip`。** 关闭旧服务，将 ZIP 完整解压到新目录，双击 `SOARProbe\Start-SOARProbe.cmd`，保留 `_internal` 及其他文件。也提供单文件 `SOARProbe.exe` 与 `SOARProbe-Windows-x64.zip`。Windows x64 无需安装 Python、依赖或 Telnet 客户端。
+
 # SOARProbe v1.4.0
 
 支持在脚本 v24.0 的探测配置中自定义备用 DNS。域名始终先用系统 DNS，解析失败或没有 A 记录时再按保存顺序尝试备用服务器；成功后先做过滤，再 Ping 和 TCP 检测，不会因结果被过滤或探测不通而更换 DNS。

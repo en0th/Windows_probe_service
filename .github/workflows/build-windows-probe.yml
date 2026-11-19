@@ -1,10 +1,13 @@
 name: Build Windows probe EXE
 
 on:
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Optional release version, for example v1.4.0 (blank builds only)'
+        description: 'Optional release version, for example v1.5.1 (blank builds only)'
         required: false
         default: ''
         type: string
@@ -43,14 +46,14 @@ jobs:
           retention-days: 14
 
   release:
-    if: ${{ inputs.release_tag != '' }}
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.release_tag != '') || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) }}
     needs: windows-x64
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
     concurrency:
-      group: probe-release-${{ inputs.release_tag }}
+      group: probe-release-${{ inputs.release_tag || github.ref_name }}
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v7.0.1
@@ -62,7 +65,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
         run: |
           set -euo pipefail
           python3 - <<'PY'

@@ -66,6 +66,7 @@ function Test-BundledExecutable {
     if ($selfTest.status -ne 'ok' -or $selfTest.frozen -ne $true -or $selfTest.bundleLayout -ne $Layout) { throw 'The EXE did not confirm bundled runtime/resources in its self-test.' }
     if ($selfTest.httpStack -ne 'starlette' -or $selfTest.validationImplementation -ne 'python' -or $selfTest.pydanticCoreBundled -isnot [bool] -or $selfTest.pydanticCoreBundled -ne $false) { throw 'The EXE did not confirm the Starlette/Python implementation without pydantic_core.' }
     if ($selfTest.customDnsServers -ne $true -or ($selfTest.dnsServers -join ',') -ne '8.8.8.8,223.5.5.5') { throw 'The EXE self-test did not confirm configurable DNS support.' }
+    if ($selfTest.k01Intelligence -ne $true) { throw 'The EXE self-test did not confirm K01 intelligence support.' }
 
     if ($Layout -eq 'onedir') {
         $expectedRuntimeRoot = [System.IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $exePath) '_internal'))
@@ -110,8 +111,22 @@ function Test-BundledExecutable {
         if ($null -eq $health -or $health.status -ne 'ok' -or $health.platform -ne 'windows' -or $health.ipv4Only -ne $true) { throw 'The bundled Windows IPv4 service did not become healthy.' }
         if ($health.domainNslookup -ne $true -or $health.domainPing -ne $true -or $health.domainDnsFallback -ne $true -or ($health.domainDefaultPorts -join ',') -ne '80,443') { throw 'The bundled service is missing domain DNS fallback or default TCP ports.' }
         if ($health.customDnsServers -ne $true -or ($health.dnsServers -join ',') -ne '8.8.8.8,223.5.5.5') { throw 'The bundled service is missing configurable DNS capability.' }
+        if ($health.k01Intelligence -ne $true) { throw 'The bundled service is missing K01 intelligence capability.' }
         $auth = Invoke-RestMethod -Uri ($smokeUrl + '/v1/auth-check') -Headers @{ Authorization = 'Bearer ' + $smokeConfig.token } -TimeoutSec 3
         if ($auth.status -ne 'ok' -or $auth.apiVersion -ne 1) { throw 'The bundled service failed its authenticated check.' }
+        $k01Config = Invoke-RestMethod -Uri ($smokeUrl + '/v1/intelligence/config') -Headers @{ Authorization = 'Bearer ' + $smokeConfig.token } -TimeoutSec 3
+        if ($k01Config.success -ne $true -or $k01Config.config.passwordConfigured -ne $false -or $null -ne $k01Config.config.password) { throw 'K01 configuration must be available without revealing credentials.' }
+        $k01Body = @{ host = 'example.org'; count = 10 } | ConvertTo-Json
+        $k01Fallback = $null
+        try {
+            Invoke-RestMethod -Uri ($smokeUrl + '/v1/intelligence/trace') -Method Post -ContentType 'application/json' -Body $k01Body -Headers @{ Authorization = 'Bearer ' + $smokeConfig.token } -TimeoutSec 3 | Out-Null
+            throw 'An unconfigured K01 API must require the frontend session.'
+        } catch {
+            if ($null -eq $_.Exception.Response -or [int]$_.Exception.Response.StatusCode -ne 409) { throw }
+            $k01Fallback = $_.ErrorDetails.Message | ConvertFrom-Json
+        }
+        if ($k01Fallback.code -ne 'K01_FRONTEND_REQUIRED' -or $k01Fallback.fallbackAllowed -ne $true) { throw 'K01 did not advertise its authenticated frontend-session fallback.' }
+        Write-Host 'Verified K01 API: credential-free config and frontend-required response without upstream network I/O.'
         # Exercise the new frozen API schema using a special address that the
         # policy must skip. No DNS, Ping or TCP target traffic is permitted here.
         $probeHeaders = @{ Authorization = 'Bearer ' + $smokeConfig.token }
