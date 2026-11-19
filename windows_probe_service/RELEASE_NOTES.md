@@ -1,5 +1,12 @@
 # 发布说明
 
+## v1.6.7
+
+- **修复 K01 改密请求兼容性与诊断**：改密请求只使用 K01 API 文档约定的 `Authorization: Bearer`，不再额外发送浏览器前端的 `access_token` 头，避免被前端签名中间件误判；成功判定兼容 `error_code` 为整数 `0` 或字符串 `"0"` 的 K01 版本。
+- 新增 `k01-password-change-start` / `k01-password-change-response` 日志，记录上游状态、`success`、`error_code`、`changepwd_err_count` 和脱敏后的上游消息；失败诊断也包含 `changepwdErrCount`。
+- 工作台脚本 v25.5：改密接口返回 404 时明确提示当前 SOARProbe 版本过低，需要替换并重启 v1.6.7 或更新版本；改密失败时提示旧密码可能已变化，应先更新本地 K01 配置。`/health` 新增 `k01PasswordChange: true`。
+- 注意：v1.6.6 的改密基础流程保留；本次只修正改密边界的头部、成功判定和现场诊断。
+
 ## v1.6.6
 
 - **脚本内修改 K01 初始密码并自动重查**：情报接口返回 `diagnosticCode:initial_password_not_changed` 时，工作台情报面板显示“修改初始密码”入口。用户只需输入并确认新密码，不再需要手工拼装带 `X-Sign` 的浏览器请求。

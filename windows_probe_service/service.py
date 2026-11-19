@@ -42,7 +42,7 @@ from k01_intelligence import (K01IntelligenceClient, K01Error, new_trace_id, nor
 import windows_icmp
 
 API_VERSION = 1
-SERVICE_VERSION = "1.6.6"
+SERVICE_VERSION = "1.6.7"
 # K01 payloads are stamped with this build so the userscript log names the exe that answered.
 set_service_version(SERVICE_VERSION)
 MAX_DNS_ADDRESSES = 64
@@ -759,7 +759,7 @@ def create_app(settings=None, policy=None, engine=None, logger=None, intelligenc
                 "safetyExclusions": True, "excludedCidrsSupported": True,
                 "domainNslookup": True, "domainPing": True,
                 "domainDnsFallback": True, "customDnsServers": True, "dnsServers": list(DEFAULT_DNS_SERVERS),
-                "k01Intelligence": True,
+                "k01Intelligence": True, "k01PasswordChange": True,
                 "domainDefaultPorts": list(DOMAIN_DEFAULT_PORTS),
                 "dnsExcluded": True, "excludedDnsAddresses": len(policy.dns_addresses)})
 

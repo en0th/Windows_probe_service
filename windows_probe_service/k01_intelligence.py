@@ -655,11 +655,6 @@ def _post_with_os_tls(config, path, payload_bytes, bearer):
                  "Content-Type: application/json; charset=utf-8"]
         if bearer:
             lines.append("Authorization: Bearer " + bearer)
-            # The K01 web frontend sends the same token in this legacy header for
-            # account operations; send it in addition to the documented bearer
-            # header so /account/changepwd works on both API and frontend builds.
-            if path == CHANGE_PASSWORD_PATH:
-                lines.append("access_token: " + bearer)
         for name, content in ((header_file, ("\n".join(lines) + "\n").encode("utf-8")),
                               (payload_file, payload_bytes),
                               (header_out, b""),
@@ -703,8 +698,6 @@ def _blocking_post(config, path, payload, bearer, *, stage=None):
         headers = {"Accept": "application/json", "Content-Type": "application/json; charset=utf-8"}
         if bearer:
             headers["Authorization"] = "Bearer " + bearer
-            if path == CHANGE_PASSWORD_PATH:
-                headers["access_token"] = bearer
         request = Request(config.base_url + path,
                           data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                           headers=headers, method="POST")
@@ -949,6 +942,8 @@ class K01IntelligenceClient:
         if not config.configured:
             raise frontend_required("api_not_configured")
         bearer = await self._get_token(config, revision)
+        self._log("k01-password-change-start", upstreamPath=CHANGE_PASSWORD_PATH,
+                  usernameConfigured=True, tokenAvailable=bool(bearer))
         reply = await self.transport(config, CHANGE_PASSWORD_PATH, {
             "username": config.username,
             "oldpwd": config.password,
@@ -964,7 +959,16 @@ class K01IntelligenceClient:
         if new_password:
             upstream_message = upstream_message.replace(new_password, "[REDACTED]")
         error_code = body.get("error_code", 0)
-        success = reply.status == 200 and body.get("success") is True and error_code == 0
+        # Some K01 versions serialize error_code as the string "0".
+        success = (reply.status == 200 and body.get("success") is True
+                   and (error_code == 0 or error_code == "0"))
+        self._log("k01-password-change-response", upstreamStatus=reply.status,
+                  successFlag=repr(body.get("success"))[:16],
+                  errorCode=error_code if type(error_code) in (int, str) else repr(error_code)[:24],
+                  changepwdErrCount=(body.get("changepwd_err_count")
+                                     if type(body.get("changepwd_err_count")) is int else None),
+                  upstreamMessage=upstream_message,
+                  elapsedMs=getattr(reply, "elapsed_ms", 0))
         if not success:
             error = K01Error("K01_PASSWORD_CHANGE_FAILED",
                              "K01 修改密码失败，请检查旧密码和新密码要求。", 502)
@@ -975,7 +979,9 @@ class K01IntelligenceClient:
                 stage="change-password", elapsed_ms=getattr(reply, "elapsed_ms", 0),
                 diagnostic={"httpStatus": reply.status,
                             "successFlag": repr(body.get("success"))[:16],
-                            "errorCode": error_code if type(error_code) is int else repr(error_code)[:24],
+                            "errorCode": error_code if type(error_code) in (int, str) else repr(error_code)[:24],
+                            "changepwdErrCount": (body.get("changepwd_err_count")
+                                                  if type(body.get("changepwd_err_count")) is int else None),
                             "message": upstream_message}))
         if revision != self.revision:
             raise K01Error("K01_PASSWORD_CHANGED_CONFIG_SAVE_FAILED",

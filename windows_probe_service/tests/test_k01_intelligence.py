@@ -391,6 +391,18 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         for secret in (ACCESS, PASSWORD, PAIRING, new_password):
             self.assertNotIn(secret, output)
 
+    async def test_change_password_accepts_string_zero_error_code(self):
+        self.configure()
+        new_password = "NewPass#2026"
+        self.responses = [login_reply(),
+                          k01.Reply(200, {"success": True, "error_code": "0",
+                                          "msg": "修改密码成功"})]
+        actual = await self.client.change_password({"newPassword": new_password,
+                                                     "confirmPassword": new_password})
+        self.assertTrue(actual["passwordChanged"])
+        self.assertEqual(self.client.config.password, new_password)
+        self.assertNotIn(new_password, self.log.getvalue())
+
     async def test_change_password_failure_reports_upstream_reason_without_secrets(self):
         self.configure()
         new_password = "NewPass#2026"
