@@ -42,7 +42,7 @@ from k01_intelligence import (K01IntelligenceClient, K01Error, new_trace_id, nor
 import windows_icmp
 
 API_VERSION = 1
-SERVICE_VERSION = "1.6.3"
+SERVICE_VERSION = "1.6.4"
 # K01 payloads are stamped with this build so the userscript log names the exe that answered.
 set_service_version(SERVICE_VERSION)
 MAX_DNS_ADDRESSES = 64

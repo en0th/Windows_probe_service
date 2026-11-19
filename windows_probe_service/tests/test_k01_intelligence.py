@@ -224,6 +224,38 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["diagnostic"]["errorCode"], 999)
         self.assertNotIn(PASSWORD, json.dumps(payload, ensure_ascii=False))
 
+    async def test_first_login_password_notice_still_uses_issued_token(self):
+        self.configure()
+        advisory = k01.Reply(200, {"success": False, "error_code": 999, "status": "change",
+                                   "msg": "首次登录建议修改密码！",
+                                   "token": {"access_token": ACCESS,
+                                             "refresh_token": "offline-refresh-token"}})
+        self.responses = [advisory, result_reply()]
+        actual = await self.client.trace({"host": "example.invalid"})
+        self.assertTrue(actual["success"])
+        self.assertEqual(actual["authSource"], "api-account")
+        self.assertEqual(actual["loginNotice"]["errorCode"], 999)
+        self.assertEqual(actual["loginNotice"]["status"], "change")
+        self.assertIn("首次登录建议修改密码", actual["loginNotice"]["message"])
+        self.assertEqual(self.calls[1][1:][2], ACCESS)
+        output = self.log.getvalue() + json.dumps(actual, ensure_ascii=False)
+        self.assertIn("ok-with-notice", output)
+        for secret in (ACCESS, PASSWORD, PAIRING):
+            self.assertNotIn(secret, output)
+
+    async def test_rejection_without_usable_token_is_still_a_login_failure(self):
+        for body in ({"success": False, "error_code": 999, "msg": "登录用户失败：用户名或密码错误"},
+                     {"success": False, "error_code": 999, "status": "change",
+                      "msg": "首次登录建议修改密码！", "token": {"access_token": "bad\r\nvalue"}},
+                     {"success": False, "error_code": 999, "token": []}):
+            self.configure()
+            self.responses = [k01.Reply(200, body)]
+            with self.subTest(body=body), self.assertRaises(k01.K01Error) as raised:
+                await self.client.trace({"host": "example.invalid"})
+            self.assertEqual(raised.exception.reason, "api_login_failed")
+            self.assertEqual(raised.exception.diagnostic_code, "login_rejected")
+            self.assertTrue(raised.exception.fallback)
+
     async def test_trace_endpoint_not_supported_allows_frontend_fallback(self):
         for status in (404, 405):
             self.configure()

@@ -773,6 +773,7 @@ class K01IntelligenceClient:
         self.config = self._load()
         self.revision = 0
         self.token = None
+        self.login_notice = None
         self.login_lock = None
         self.semaphore = None
         self.inflight = {}
@@ -815,6 +816,7 @@ class K01IntelligenceClient:
         self.config = candidate
         self.revision += 1
         self.token = None
+        self.login_notice = None
         self.cache.clear()
         self.cache_bytes = 0
         self._log("k01-config-saved", configured=candidate.configured)
@@ -872,15 +874,31 @@ class K01IntelligenceClient:
             body = reply.data
             if not isinstance(body, dict) or type(body.get("success")) is not bool:
                 raise _with_reply(K01Error("K01_PROTOCOL_ERROR", "K01 登录响应格式异常。"), reply)
-            if body["success"] is not True:
+            token_block = body.get("token") if isinstance(body.get("token"), dict) else {}
+            token = token_block.get("access_token")
+            usable = isinstance(token, str) and re.fullmatch(r"[A-Za-z0-9._~+/-]{1,32768}=*", token)
+            # K01 flags "首次登录建议修改密码" as success:false + error_code:999 while still
+            # returning a usable access_token. The issued token is the real signal: dropping
+            # it turns a password-change advisory into a hard login failure.
+            if body["success"] is not True and not usable:
                 raise self._login_rejected(reply, config, "login_rejected")
-            token = body.get("token", {}).get("access_token") if isinstance(body.get("token"), dict) else None
-            if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9._~+/-]{1,32768}=*", token):
+            if not usable:
                 raise _with_reply(K01Error("K01_PROTOCOL_ERROR", "K01 登录响应缺少有效访问令牌。"), reply)
+            if body["success"] is not True:
+                error_code = body.get("error_code")
+                self.login_notice = {
+                    "status": _diagnostic_text(str(body.get("status", ""))[:32], config, None),
+                    "errorCode": error_code if type(error_code) is int else None,
+                    "message": _diagnostic_text(str(body.get("msg", ""))[:160], config, None)}
+                self._log("k01-api-login", result="ok-with-notice",
+                          elapsedMs=getattr(reply, "elapsed_ms", 0), tokenLength=len(token),
+                          upstreamStatus=reply.status, errorCode=self.login_notice["errorCode"],
+                          notice=self.login_notice["message"])
+            else:
+                self._log("k01-api-login", result="ok", elapsedMs=getattr(reply, "elapsed_ms", 0),
+                          tokenLength=len(token))
             if revision == self.revision:
                 self.token = (revision, token, self.clock() + 900)
-            self._log("k01-api-login", result="ok", elapsedMs=getattr(reply, "elapsed_ms", 0),
-                      tokenLength=len(token))
             return token
 
     async def _query(self, config, revision, host, count):
@@ -931,6 +949,8 @@ class K01IntelligenceClient:
                 while len(self.cache) > MAX_CACHE_ENTRIES or self.cache_bytes > MAX_CACHE_BYTES:
                     _, entry = self.cache.popitem(last=False)
                     self.cache_bytes -= entry[2]
+            if self.login_notice:
+                result["loginNotice"] = dict(self.login_notice)
             self._log("k01-query-result", host=host, authSource="api-account", elapsedMs=result["elapsedMs"], cacheHit=False)
             return result
 
@@ -995,3 +1015,4 @@ class K01IntelligenceClient:
         self.cache.clear()
         self.cache_bytes = 0
         self.token = None
+        self.login_notice = None

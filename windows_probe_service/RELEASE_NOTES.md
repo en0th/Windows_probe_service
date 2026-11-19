@@ -1,5 +1,11 @@
 # 发布说明
 
+## v1.6.4
+
+- **首次登录改密提示不再当作登录失败**：K01 在"首次登录建议修改密码"时返回 `success:false`、`error_code:999`、`status:"change"`，但响应体里已经下发了可用的 `access_token`。以前一律按 `api_login_failed` 放弃，导致能登录的账号在情报链路里全部失败。现在以令牌是否可用为准：拿到有效 `access_token` 就继续查询，同时把该提示记录为 `k01-api-login result=ok-with-notice` 并随结果返回 `loginNotice`（`status` / `errorCode` / `message`，脱敏）。
+- 真正的拒登（无可用令牌，例如"用户名或密码错误"）行为不变，仍返回 `K01_FRONTEND_REQUIRED` + `diagnosticCode:login_rejected`。
+- 工作台脚本 v25.2：情报面板在计数下方显示 `K01 提示：首次登录建议修改密码！`，明确标注"情报已通过令牌获取"，不再需要靠日志判断到底是密码错还是改密提示。
+
 ## v1.6.3
 
 - **登录被拒给出上游原因**：K01 `/api/cms/user/login` 返回 HTTP 200 但 `success:false`（或 400/401/403）时，错误诊断新增 `diagnosticCode`（`login_rejected` / `login_http_rejected`）、`diagnostic.errorCode`、`diagnostic.message`，对端提示文本经脱敏后同时拼进用户可见消息，例如"API 账号登录被拒（上游返回：登录用户失败：用户名或密码错误）"。以前只能看到笼统的 `api_login_failed`。
