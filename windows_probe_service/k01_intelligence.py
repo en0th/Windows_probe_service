@@ -834,6 +834,27 @@ class K01IntelligenceClient:
                 "timeoutMs": self.config.timeout_ms, "cacheSeconds": self.config.cache_seconds,
                 "revision": self.revision, "tokenAvailable": bool(self.token)}
 
+    def _login_rejected(self, reply, config, diagnostic_code):
+        """Explain a rejected login with the gateway's own error_code/msg.
+
+        Without this an HTTP 200 + ``success:false`` login only reports
+        ``api_login_failed`` and the wrong password is indistinguishable from a
+        locked account or a gateway page, so the operator retries blindly.
+        """
+        body = reply.data if isinstance(reply.data, dict) else {}
+        error_code = body.get("error_code")
+        message = _diagnostic_text(str(body.get("msg", ""))[:160], config, None)
+        error = frontend_required("api_login_failed")
+        if message:
+            error.message = f"{error.message}（上游返回：{message}）"
+        return _with_reply(error, Reply(
+            reply.status, None, diagnostic_code=diagnostic_code, stage="login",
+            elapsed_ms=getattr(reply, "elapsed_ms", 0),
+            diagnostic={"httpStatus": reply.status,
+                        "successFlag": repr(body.get("success"))[:16],
+                        "errorCode": error_code if type(error_code) is int else repr(error_code)[:24],
+                        "message": message}))
+
     async def _get_token(self, config, revision):
         if self.login_lock is None:
             self.login_lock = asyncio.Lock()
@@ -845,14 +866,14 @@ class K01IntelligenceClient:
             if reply.status in {404, 405}:
                 raise _with_reply(frontend_required("api_login_unavailable"), reply)
             if reply.status in {400, 401, 403}:
-                raise _with_reply(frontend_required("api_login_failed"), reply)
+                raise self._login_rejected(reply, config, "login_http_rejected")
             if reply.status != 200:
                 raise _with_reply(K01Error("K01_UPSTREAM_ERROR", "K01 登录服务返回异常，请稍后重试。"), reply)
             body = reply.data
             if not isinstance(body, dict) or type(body.get("success")) is not bool:
                 raise _with_reply(K01Error("K01_PROTOCOL_ERROR", "K01 登录响应格式异常。"), reply)
             if body["success"] is not True:
-                raise _with_reply(frontend_required("api_login_failed"), reply)
+                raise self._login_rejected(reply, config, "login_rejected")
             token = body.get("token", {}).get("access_token") if isinstance(body.get("token"), dict) else None
             if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9._~+/-]{1,32768}=*", token):
                 raise _with_reply(K01Error("K01_PROTOCOL_ERROR", "K01 登录响应缺少有效访问令牌。"), reply)

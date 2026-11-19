@@ -205,6 +205,25 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.reason, "api_login_failed")
         self.assertNotIn(PASSWORD, json.dumps(raised.exception.payload()))
 
+    async def test_login_rejection_reports_upstream_error_code_and_message(self):
+        self.configure()
+        self.responses = [k01.Reply(200, {"success": False, "error_code": 999,
+                                          "msg": "登录用户失败：用户名或密码错误"})]
+        with self.assertRaises(k01.K01Error) as raised:
+            await self.client.trace({"host": "example.invalid"})
+        error = raised.exception
+        self.assertEqual(error.code, "K01_FRONTEND_REQUIRED")
+        self.assertEqual(error.reason, "api_login_failed")
+        self.assertEqual(error.stage, "login")
+        self.assertEqual(error.diagnostic_code, "login_rejected")
+        self.assertEqual(error.diagnostic["errorCode"], 999)
+        self.assertIn("用户名或密码错误", error.diagnostic["message"])
+        self.assertIn("用户名或密码错误", error.message)
+        payload = error.payload()
+        self.assertEqual(payload["diagnosticCode"], "login_rejected")
+        self.assertEqual(payload["diagnostic"]["errorCode"], 999)
+        self.assertNotIn(PASSWORD, json.dumps(payload, ensure_ascii=False))
+
     async def test_trace_endpoint_not_supported_allows_frontend_fallback(self):
         for status in (404, 405):
             self.configure()
