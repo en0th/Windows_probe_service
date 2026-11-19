@@ -74,7 +74,7 @@ class DnsFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.real_lookup(); self.successful_probes()
         with patch.object(service.dns.asyncresolver, "Resolver", side_effect=self.resolver_factory(outcomes, calls)):
             result = await self.engine.probe(DOMAIN, 8443, ping_count=1, tcp_attempts=1)
-        self.assertEqual([call["server"] for call in calls], list(service.DNS_RESOLVER_SEQUENCE))
+        self.assertEqual([call["server"] for call in calls], ["system", "8.8.8.8", "223.5.5.5"])
         self.assertEqual(result["nslookup"]["resolver"], "223.5.5.5")
         self.assertEqual([attempt.get("error") for attempt in result["nslookup"]["attempts"]], ["dns_nodata", "dns_server_failure", None])
         self.engine._ping.assert_awaited_once_with(PUBLIC)
@@ -82,7 +82,9 @@ class DnsFallbackTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_all_resolvers_fail_and_no_target_operations_are_started(self):
         calls = []
-        outcomes = {"system": service.dns.resolver.NoAnswer(), "8.8.8.8": service.dns.resolver.NXDOMAIN(), "223.5.5.5": asyncio.TimeoutError()}
+        outcomes = {"system": service.dns.resolver.NoAnswer(), "8.8.8.8": service.dns.resolver.NXDOMAIN(),
+                    "223.5.5.5": asyncio.TimeoutError(), "223.6.6.6": asyncio.TimeoutError(),
+                    "180.76.76.76": asyncio.TimeoutError()}
         self.real_lookup()
         with patch.object(service.dns.asyncresolver, "Resolver", side_effect=self.resolver_factory(outcomes, calls)):
             result = await self.engine.probe(DOMAIN, None)
@@ -90,7 +92,7 @@ class DnsFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["nslookup"]["resolver"], None)
         self.assertEqual(result["nslookup"]["status"], "timeout")
         self.assertEqual(result["nslookup"]["answers"], [])
-        self.assertEqual(len(result["nslookup"]["attempts"]), 3)
+        self.assertEqual(len(result["nslookup"]["attempts"]), len(service.DNS_RESOLVER_SEQUENCE))
         self.engine._ping.assert_not_called(); self.engine._tcp.assert_not_called()
 
     async def test_first_successful_answer_is_filtered_without_querying_another_resolver(self):
@@ -137,8 +139,8 @@ class DnsFallbackTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(service.dns.asyncresolver, "Resolver", side_effect=self.resolver_factory(outcomes, calls)), \
              patch.object(self.engine, "_io", wraps=self.engine._io) as io:
             result = await asyncio.wait_for(self.engine.probe(DOMAIN, None), 1)
-        self.assertEqual(len(calls), 3); self.assertEqual(io.await_count, 3)
-        self.assertEqual([attempt["status"] for attempt in result["nslookup"]["attempts"]], ["timeout"] * 3)
+        self.assertEqual(len(calls), len(service.DNS_RESOLVER_SEQUENCE)); self.assertEqual(io.await_count, len(service.DNS_RESOLVER_SEQUENCE))
+        self.assertEqual([attempt["status"] for attempt in result["nslookup"]["attempts"]], ["timeout"] * len(service.DNS_RESOLVER_SEQUENCE))
         self.engine._ping.assert_not_called(); self.engine._tcp.assert_not_called()
 
     async def test_literal_ip_without_port_remains_ping_only_and_never_uses_dns_fallback(self):
