@@ -9,7 +9,8 @@ import unittest
 
 SERVICE_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SERVICE_DIR))
-from probe_models import MAX_TARGETS, ProbeBatch, ProbeTarget, ValidationError, normalize_host
+from probe_models import (DEFAULT_PING_COUNT, DEFAULT_PROBE_TIMEOUT_MS, DEFAULT_TCP_ATTEMPTS,
+                          MAX_TARGETS, ProbeBatch, ProbeTarget, ValidationError, normalize_host)
 
 
 PUBLIC = "93.184.216.34"
@@ -89,9 +90,24 @@ class TargetValidationTests(unittest.TestCase):
 class BatchValidationTests(unittest.TestCase):
     def test_json_round_trip_includes_original_api_defaults(self):
         payload = {"queryId": "q1", "targets": [{"id": "t1", "host": PUBLIC, "port": None}],
-                   "excludedHosts": [], "excludedCidrs": [], "dnsServers": ["8.8.8.8", "223.5.5.5"]}
+                   "excludedHosts": [], "excludedCidrs": [], "dnsServers": ["8.8.8.8", "223.5.5.5"],
+                   "pingCount": 5, "tcpAttempts": 3, "timeoutMs": 3000}
         self.assertEqual(batch().model_dump(), payload)
         self.assertEqual(ProbeBatch.model_validate(json.loads(json.dumps(payload))).model_dump(), payload)
+
+    def test_probe_attempt_defaults_and_strict_bounds(self):
+        parsed = batch()
+        self.assertEqual(parsed.pingCount, DEFAULT_PING_COUNT)
+        self.assertEqual(parsed.tcpAttempts, DEFAULT_TCP_ATTEMPTS)
+        self.assertEqual(parsed.timeoutMs, DEFAULT_PROBE_TIMEOUT_MS)
+        custom = batch(pingCount=1, tcpAttempts=10, timeoutMs=200)
+        self.assertEqual((custom.pingCount, custom.tcpAttempts, custom.timeoutMs), (1, 10, 200))
+        for changes in ({"pingCount": 0}, {"pingCount": 11}, {"pingCount": True},
+                        {"tcpAttempts": 0}, {"tcpAttempts": 11}, {"tcpAttempts": "3"},
+                        {"timeoutMs": 199}, {"timeoutMs": 10001}, {"timeoutMs": 30.0},
+                        {"timeoutMs": False}):
+            with self.subTest(changes=changes), self.assertRaises(ValidationError):
+                batch(**changes)
 
     def test_query_id_is_required_strict_and_bounded(self):
         self.assertEqual(batch(queryId="q" * 160).queryId, "q" * 160)

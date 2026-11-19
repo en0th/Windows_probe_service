@@ -1,5 +1,13 @@
 # 发布说明
 
+## v1.6.8
+
+- **Ping/Telnet 重试和超时可配置**：默认每个 IPv4 Ping 最多 5 次、每个 TCP 端口最多连接 3 次、单次操作超时 3000 ms。Ping 成功即停止；TCP 成功或明确拒绝即停止，只有超时/错误才继续重试。
+- `/v1/probes` 新增可选字段 `pingCount`（1–10）、`tcpAttempts`（1–10）、`timeoutMs`（200–10000），省略时使用上述默认值。字段参与缓存和共享任务隔离，避免不同探测参数复用旧结果；结果中的 `attempts` 和 `configuredAttempts` 可直接查看实际次数。
+- `/health` 新增 `probeSettings: true`、`defaultPingCount: 5`、`defaultTcpAttempts: 3`、`defaultProbeTimeoutMs: 3000`。
+- 工作台脚本 v25.9：网络探测配置可设置 Ping 次数、Telnet 次数和单次超时；DNS 场景新增百度 `180.76.76.76`、阿里 `223.5.5.5/223.6.6.6`，并保留默认、仅系统 DNS 和自定义。
+- 离线测试增至 189 项。
+
 ## v1.6.7
 
 - **修复 K01 改密请求兼容性与诊断**：改密请求只使用 K01 API 文档约定的 `Authorization: Bearer`，不再额外发送浏览器前端的 `access_token` 头，避免被前端签名中间件误判；成功判定兼容 `error_code` 为整数 `0` 或字符串 `"0"` 的 K01 版本。

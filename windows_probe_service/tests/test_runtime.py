@@ -216,6 +216,39 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.engine._ping.assert_awaited_once_with(OTHER)
         self.engine._tcp.assert_awaited_once_with(OTHER, 443)
 
+    async def test_ping_retries_configured_count_until_reachable(self):
+        self.engine._ping = AsyncMock(side_effect=[
+            {"address": PUBLIC, "status": "timeout", "elapsedMs": 10},
+            {"address": PUBLIC, "status": "unreachable", "elapsedMs": 11},
+            {"address": PUBLIC, "status": "reachable", "roundTripMs": 2, "elapsedMs": 12},
+        ])
+        self.engine._tcp = AsyncMock(return_value={"address": PUBLIC, "port": 443, "status": "open"})
+        result = await self.engine.probe(PUBLIC, 443, ping_count=5, tcp_attempts=3, timeout_ms=1234)
+        self.assertEqual(self.engine._ping.await_count, 3)
+        self.assertEqual(result["ping"][0]["status"], "reachable")
+        self.assertEqual(result["ping"][0]["attempts"], 3)
+        self.assertEqual(result["ping"][0]["configuredAttempts"], 5)
+        self.assertEqual(result["ping"][0]["roundTripMs"], 2)
+
+    async def test_tcp_retries_timeouts_until_open_and_uses_request_timeout(self):
+        seen_timeouts = []
+        async def ping(address):
+            seen_timeouts.append(service._PROBE_TIMEOUT_MS.get())
+            return {"address": address, "status": "reachable"}
+        self.engine._ping = AsyncMock(side_effect=ping)
+        self.engine._tcp = AsyncMock(side_effect=[
+            {"address": PUBLIC, "port": 443, "status": "timeout", "elapsedMs": 30},
+            {"address": PUBLIC, "port": 443, "status": "error", "elapsedMs": 31, "error": "os_error_1"},
+            {"address": PUBLIC, "port": 443, "status": "open", "elapsedMs": 32},
+        ])
+        result = await self.engine.probe(PUBLIC, 443, ping_count=5, tcp_attempts=3, timeout_ms=1234)
+        self.assertEqual(self.engine._tcp.await_count, 3)
+        self.assertEqual(result["tcp"][0]["status"], "open")
+        self.assertEqual(result["tcp"][0]["attempts"], 3)
+        self.assertEqual(result["tcp"][0]["configuredAttempts"], 3)
+        self.assertEqual(seen_timeouts, [1234])
+        self.assertIsNone(service._PROBE_TIMEOUT_MS.get())
+
     async def test_known_port_tcp_attempted_even_when_ping_has_no_response(self):
         for status in ["unreachable", "timeout", "error"]:
             with self.subTest(status=status):
@@ -272,6 +305,24 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.engine.probe.await_count, 3)
         self.assertEqual(self.engine.snapshot(first.id)["status"], "completed")
         self.assertEqual(self.engine.snapshot(second.id)["status"], "completed")
+
+    async def test_ping_tcp_and_timeout_settings_isolate_cache_and_inflight_work(self):
+        self.engine.probe = AsyncMock(return_value={"resolved": [PUBLIC], "dns": {"status": "ok"}, "ping": [], "tcp": []})
+        first = self.engine.submit(batch(pingCount=5, tcpAttempts=3, timeoutMs=3000))
+        second = self.engine.submit(batch(pingCount=2, tcpAttempts=3, timeoutMs=3000))
+        third = self.engine.submit(batch(pingCount=5, tcpAttempts=2, timeoutMs=3000))
+        fourth = self.engine.submit(batch(pingCount=5, tcpAttempts=3, timeoutMs=1500))
+        self.assertEqual(len(self.engine.inflight), 4)
+        await self.engine.start()
+        await asyncio.wait_for(self.engine.queue.join(), 1)
+        self.assertEqual(self.engine.probe.await_count, 4)
+        settings = {(call.kwargs["ping_count"], call.kwargs["tcp_attempts"], call.kwargs["timeout_ms"])
+                    for call in self.engine.probe.await_args_list}
+        self.assertEqual(settings, {(5, 3, 3000), (2, 3, 3000), (5, 2, 3000), (5, 3, 1500)})
+        same = self.engine.submit(batch(pingCount=5, tcpAttempts=3, timeoutMs=3000))
+        await asyncio.wait_for(self.engine.queue.join(), 1)
+        self.assertEqual(self.engine.probe.await_count, 4)
+        self.assertTrue(self.engine.snapshot(same.id)["results"][0]["cached"])
 
     async def test_request_cidrs_isolate_cached_and_inflight_results(self):
         self.engine.probe = AsyncMock(return_value={"resolved": [PUBLIC], "dns": {"status": "ok"}, "ping": [], "tcp": []})

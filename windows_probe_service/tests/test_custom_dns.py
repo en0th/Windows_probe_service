@@ -179,12 +179,23 @@ class CustomDnsTests(unittest.IsolatedAsyncioTestCase):
             health = (await client.get("/health")).json()
             self.assertIs(health["customDnsServers"], True)
             self.assertEqual(health["dnsServers"], list(DEFAULT_DNS_SERVERS))
+            self.assertIs(health["probeSettings"], True)
+            self.assertEqual(health["defaultPingCount"], 5)
+            self.assertEqual(health["defaultTcpAttempts"], 3)
+            self.assertEqual(health["defaultProbeTimeoutMs"], 3000)
             payload = {"queryId": "old-client", "targets": [{"id": "old", "host": PUBLIC}]}
             self.assertEqual((await client.post("/v1/probes", json=payload)).status_code, 202)
             payload["queryId"] = "system-only-client"
             payload["dnsServers"] = []
             self.assertEqual((await client.post("/v1/probes", json=payload)).status_code, 202)
             payload["dnsServers"] = ["127.0.0.1"]
+            self.assertEqual((await client.post("/v1/probes", json=payload)).status_code, 422)
+            payload["dnsServers"] = list(DEFAULT_DNS_SERVERS)
+            payload["pingCount"] = 5
+            payload["tcpAttempts"] = 3
+            payload["timeoutMs"] = 3000
+            self.assertEqual((await client.post("/v1/probes", json=payload)).status_code, 202)
+            payload["timeoutMs"] = 199
             self.assertEqual((await client.post("/v1/probes", json=payload)).status_code, 422)
 
 

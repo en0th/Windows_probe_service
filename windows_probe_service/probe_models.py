@@ -14,6 +14,13 @@ import re
 MAX_TARGETS = 4000
 MAX_DNS_SERVERS = 8
 DEFAULT_DNS_SERVERS = ("8.8.8.8", "223.5.5.5")
+DEFAULT_PING_COUNT = 5
+DEFAULT_TCP_ATTEMPTS = 3
+DEFAULT_PROBE_TIMEOUT_MS = 3000
+MAX_PING_COUNT = 10
+MAX_TCP_ATTEMPTS = 10
+MIN_PROBE_TIMEOUT_MS = 200
+MAX_PROBE_TIMEOUT_MS = 10000
 # Explicit ranges keep validation stable across Python ipaddress database updates.
 # RFC1918 and shared enterprise networks remain valid resolver destinations.
 DNS_SERVER_DENIED_CIDRS = (
@@ -77,6 +84,12 @@ def _string(value, field: str, maximum: int) -> str:
         raise ValidationError("Input should be a valid string", loc=(field,), error_type="string_type")
     if not 1 <= len(value) <= maximum:
         raise ValidationError(f"String must contain between 1 and {maximum} characters", loc=(field,), error_type="string_length")
+    return value
+
+
+def _bounded_int(value, field: str, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+        raise ValidationError(f"Integer must be between {minimum} and {maximum}", loc=(field,), error_type="int_range")
     return value
 
 
@@ -169,9 +182,13 @@ class ProbeBatch:
     excludedHosts: list[str]
     excludedCidrs: list[str]
     dnsServers: list[str]
+    pingCount: int
+    tcpAttempts: int
+    timeoutMs: int
 
     def __init__(self, **data):
-        _check_fields(data, {"queryId", "targets", "excludedHosts", "excludedCidrs", "dnsServers"}, ("queryId", "targets"))
+        _check_fields(data, {"queryId", "targets", "excludedHosts", "excludedCidrs", "dnsServers",
+                             "pingCount", "tcpAttempts", "timeoutMs"}, ("queryId", "targets"))
         query_id = _string(data["queryId"], "queryId", 160)
         raw_targets = _list(data["targets"], "targets", MAX_TARGETS, minimum=1)
         targets, ids = [], set()
@@ -187,11 +204,20 @@ class ProbeBatch:
         excluded_hosts = _exclusions(data.get("excludedHosts", []), "excludedHosts", 200, cidrs=False)
         excluded_cidrs = _exclusions(data.get("excludedCidrs", []), "excludedCidrs", 2048, cidrs=True)
         dns_servers = normalize_dns_servers(data.get("dnsServers", list(DEFAULT_DNS_SERVERS)))
+        ping_count = _bounded_int(data.get("pingCount", DEFAULT_PING_COUNT),
+                                  "pingCount", 1, MAX_PING_COUNT)
+        tcp_attempts = _bounded_int(data.get("tcpAttempts", DEFAULT_TCP_ATTEMPTS),
+                                    "tcpAttempts", 1, MAX_TCP_ATTEMPTS)
+        timeout_ms = _bounded_int(data.get("timeoutMs", DEFAULT_PROBE_TIMEOUT_MS),
+                                  "timeoutMs", MIN_PROBE_TIMEOUT_MS, MAX_PROBE_TIMEOUT_MS)
         object.__setattr__(self, "queryId", query_id)
         object.__setattr__(self, "targets", targets)
         object.__setattr__(self, "excludedHosts", excluded_hosts)
         object.__setattr__(self, "excludedCidrs", excluded_cidrs)
         object.__setattr__(self, "dnsServers", dns_servers)
+        object.__setattr__(self, "pingCount", ping_count)
+        object.__setattr__(self, "tcpAttempts", tcp_attempts)
+        object.__setattr__(self, "timeoutMs", timeout_ms)
 
     @classmethod
     def model_validate(cls, value) -> ProbeBatch:
@@ -199,10 +225,12 @@ class ProbeBatch:
             value = value.model_dump()
         if not isinstance(value, dict):
             raise ValidationError("Input should be a valid object", error_type="model_type")
-        _check_fields(value, {"queryId", "targets", "excludedHosts", "excludedCidrs", "dnsServers"}, ("queryId", "targets"))
+        _check_fields(value, {"queryId", "targets", "excludedHosts", "excludedCidrs", "dnsServers",
+                              "pingCount", "tcpAttempts", "timeoutMs"}, ("queryId", "targets"))
         return cls(**value)
 
     def model_dump(self) -> dict:
         return {"queryId": self.queryId, "targets": [target.model_dump() for target in self.targets],
                 "excludedHosts": list(self.excludedHosts), "excludedCidrs": list(self.excludedCidrs),
-                "dnsServers": list(self.dnsServers)}
+                "dnsServers": list(self.dnsServers), "pingCount": self.pingCount,
+                "tcpAttempts": self.tcpAttempts, "timeoutMs": self.timeoutMs}

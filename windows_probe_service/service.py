@@ -5,6 +5,7 @@ import argparse
 import asyncio
 from collections import OrderedDict
 from contextlib import asynccontextmanager
+import contextvars
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import errno
@@ -35,18 +36,21 @@ from starlette.routing import Route
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from network_policy import NetworkPolicy
-from probe_models import DEFAULT_DNS_SERVERS, MAX_TARGETS, ProbeBatch, ProbeTarget, ValidationError, normalize_host
+from probe_models import (DEFAULT_DNS_SERVERS, DEFAULT_PING_COUNT, DEFAULT_PROBE_TIMEOUT_MS,
+                            DEFAULT_TCP_ATTEMPTS, MAX_TARGETS, ProbeBatch, ProbeTarget,
+                            ValidationError, normalize_host)
 from k01_intelligence import (K01IntelligenceClient, K01Error, new_trace_id, normalize_trace_id,
                               reset_trace_id, set_trace_id, set_service_version,
                               config_from_payload as k01_config_from_payload)
 import windows_icmp
 
 API_VERSION = 1
-SERVICE_VERSION = "1.6.7"
+SERVICE_VERSION = "1.6.8"
 # K01 payloads are stamped with this build so the userscript log names the exe that answered.
 set_service_version(SERVICE_VERSION)
 MAX_DNS_ADDRESSES = 64
 DNS_RESOLVER_SEQUENCE = ("system", *DEFAULT_DNS_SERVERS)
+_PROBE_TIMEOUT_MS = contextvars.ContextVar("soar_probe_timeout_ms", default=None)
 DOMAIN_DEFAULT_PORTS = (80, 443)
 MAX_BODY_BYTES = 2 * 1024 * 1024
 def resource_path(name: str) -> Path:
@@ -206,7 +210,7 @@ class Settings:
     data_dir: Path = field(default_factory=lambda: Path.home() / ".soar-probe")
     port: int = 8765
     concurrency: int = 16
-    timeout_ms: int = 2000
+    timeout_ms: int = 3000
     operations_per_second: float = 50
     cache_seconds: float = 60
     cache_size: int = 4096
@@ -229,7 +233,7 @@ def load_settings(data_dir: Optional[Path] = None) -> Settings:
     path = folder / "config.json"
     if not path.exists():
         data = {"token": secrets.token_urlsafe(32), "port": 8765,
-                "concurrency": 16, "timeoutMs": 2000,
+                "concurrency": 16, "timeoutMs": 3000,
                 "operationsPerSecond": 50, "cacheSeconds": 60, "excludedCidrs": []}
         # Exclusive creation preserves the original pairing token on repeated install.
         try:
@@ -245,7 +249,7 @@ def load_settings(data_dir: Optional[Path] = None) -> Settings:
         raise ValueError("config.json token invalid; use a random URL-safe token of 32+ characters")
     numbers = {"port": (1024, 65535), "concurrency": (1, 64), "timeoutMs": (200, 10000),
                "operationsPerSecond": (1, 200), "cacheSeconds": (0, 3600)}
-    defaults = {"port": 8765, "concurrency": 16, "timeoutMs": 2000,
+    defaults = {"port": 8765, "concurrency": 16, "timeoutMs": 3000,
                 "operationsPerSecond": 50, "cacheSeconds": 60}
     for key, (low, high) in numbers.items():
         value = data.get(key, defaults[key])
@@ -298,6 +302,9 @@ class Entry:
     excluded_hosts: tuple = ()
     excluded_cidrs: tuple = ()
     dns_servers: tuple = DEFAULT_DNS_SERVERS
+    ping_count: int = DEFAULT_PING_COUNT
+    tcp_attempts: int = DEFAULT_TCP_ATTEMPTS
+    timeout_ms: int = DEFAULT_PROBE_TIMEOUT_MS
     watchers: list = field(default_factory=list)
     started: bool = False
 
@@ -398,8 +405,10 @@ class ProbeEngine:
         exclusions = tuple(sorted(batch.excludedHosts))
         excluded_cidrs = tuple(sorted(batch.excludedCidrs))
         dns_servers = tuple(batch.dnsServers)
+        ping_count, tcp_attempts, timeout_ms = batch.pingCount, batch.tcpAttempts, batch.timeoutMs
         def target_key(target):
-            return (target.host, target.port, exclusions, excluded_cidrs, dns_servers)
+            return (target.host, target.port, exclusions, excluded_cidrs, dns_servers,
+                    ping_count, tcp_attempts, timeout_ms)
         new_keys = {target_key(t) for t in batch.targets} - self.inflight.keys() - self.cache.keys()
         if self.queue.qsize() + len(new_keys) > self.settings.queue_size:
             raise CapacityError("probe_queue_full")
@@ -413,13 +422,16 @@ class ProbeEngine:
                 continue
             if key not in self.inflight:
                 entry = Entry(key, target.host, target.port, excluded_hosts=exclusions,
-                              excluded_cidrs=excluded_cidrs, dns_servers=dns_servers)
+                              excluded_cidrs=excluded_cidrs, dns_servers=dns_servers,
+                              ping_count=ping_count, tcp_attempts=tcp_attempts,
+                              timeout_ms=timeout_ms)
                 self.inflight[key] = entry
                 self.queue.put_nowait(entry)
             self.inflight[key].watchers.append((job.id, target))
         self.log("job_submitted", jobId=job.id, queryId=job.query_id, total=job.total,
                  uniqueTargets=len({(t.host, t.port) for t in batch.targets}),
-                 excludedHosts=list(exclusions), excludedCidrs=list(excluded_cidrs), dnsServers=list(dns_servers))
+                 excludedHosts=list(exclusions), excludedCidrs=list(excluded_cidrs), dnsServers=list(dns_servers),
+                 pingCount=ping_count, tcpAttempts=tcp_attempts, timeoutMs=timeout_ms)
         return job
 
     def cancel(self, job_id):
@@ -468,7 +480,8 @@ class ProbeEngine:
                 try:
                     result = await self.probe(entry.host, entry.port, should_continue=lambda: bool(entry.watchers),
                                               excluded_hosts=entry.excluded_hosts, excluded_cidrs=entry.excluded_cidrs,
-                                              dns_servers=entry.dns_servers)
+                                              dns_servers=entry.dns_servers, ping_count=entry.ping_count,
+                                              tcp_attempts=entry.tcp_attempts, timeout_ms=entry.timeout_ms)
                 except AbandonedProbe:
                     continue
                 except Exception as exc:
@@ -509,9 +522,12 @@ class ProbeEngine:
                 raise AbandonedProbe()
             return await operation()
 
+    def _probe_timeout_ms(self):
+        return _PROBE_TIMEOUT_MS.get() or self.settings.timeout_ms
+
     async def _resolve(self, host, should_continue=None, dns_servers=DEFAULT_DNS_SERVERS):
         attempts = []
-        budget = self.settings.timeout_ms / 1000
+        budget = self._probe_timeout_ms() / 1000
         for server in ("system", *dns_servers):
             if should_continue is not None and not should_continue():
                 raise AbandonedProbe()
@@ -555,16 +571,16 @@ class ProbeEngine:
         return DnsResolution([], [], attempts, status=last["status"], error=last["error"])
 
     async def _ping(self, address):
-        return await asyncio.to_thread(windows_icmp.ping, address, self.settings.timeout_ms)
+        return await asyncio.to_thread(windows_icmp.ping, address, self._probe_timeout_ms())
 
     async def _tcp(self, address, port):
         started = time.monotonic()
         writer = None
+        timeout = self._probe_timeout_ms() / 1000
         try:
             # A validated numeric address pins the actual destination; never
             # resolve the original domain again after policy validation.
-            _, writer = await asyncio.wait_for(asyncio.open_connection(address, port),
-                                               self.settings.timeout_ms / 1000)
+            _, writer = await asyncio.wait_for(asyncio.open_connection(address, port), timeout)
             return {"address": address, "port": port, "status": "open",
                     "elapsedMs": round((time.monotonic() - started) * 1000)}
         except asyncio.TimeoutError:
@@ -583,7 +599,61 @@ class ProbeEngine:
                 except (OSError, asyncio.TimeoutError):
                     pass
 
-    async def probe(self, host, port, should_continue=None, excluded_hosts=(), excluded_cidrs=(), dns_servers=DEFAULT_DNS_SERVERS):
+    async def _ping_with_retries(self, address, count, should_continue):
+        started = time.monotonic()
+        attempts = []
+        for attempt in range(1, count + 1):
+            result = await self._io(lambda: self._ping(address), should_continue)
+            attempts.append({"attempt": attempt, "status": result.get("status"),
+                             "elapsedMs": result.get("elapsedMs", 0),
+                             **({"roundTripMs": result["roundTripMs"]} if "roundTripMs" in result else {}),
+                             **({"error": result["error"]} if "error" in result else {})})
+            if result.get("status") == "reachable":
+                break
+        last = attempts[-1]
+        result = {"address": address, "status": last.get("status", "error"),
+                  "attempts": len(attempts), "configuredAttempts": count,
+                  "elapsedMs": round((time.monotonic() - started) * 1000)}
+        if "roundTripMs" in last:
+            result["roundTripMs"] = last["roundTripMs"]
+        if "error" in last and last["status"] != "reachable":
+            result["error"] = last["error"]
+        return result
+
+    async def _tcp_with_retries(self, address, port, count, should_continue):
+        started = time.monotonic()
+        attempts = []
+        for attempt in range(1, count + 1):
+            result = await self._io(lambda: self._tcp(address, port), should_continue)
+            attempts.append({"attempt": attempt, "status": result.get("status"),
+                             "elapsedMs": result.get("elapsedMs", 0),
+                             **({"error": result["error"]} if "error" in result else {})})
+            # Open and refused are definitive outcomes; only timeout/error is worth retrying.
+            if result.get("status") in {"open", "refused"}:
+                break
+        last = attempts[-1]
+        result = {"address": address, "port": port, "status": last.get("status", "error"),
+                  "attempts": len(attempts), "configuredAttempts": count,
+                  "elapsedMs": round((time.monotonic() - started) * 1000)}
+        if "error" in last and last["status"] not in {"open", "refused"}:
+            result["error"] = last["error"]
+        return result
+
+    async def probe(self, host, port, should_continue=None, excluded_hosts=(), excluded_cidrs=(),
+                    dns_servers=DEFAULT_DNS_SERVERS, ping_count=DEFAULT_PING_COUNT,
+                    tcp_attempts=DEFAULT_TCP_ATTEMPTS, timeout_ms=None):
+        token = _PROBE_TIMEOUT_MS.set(timeout_ms if timeout_ms is not None else self.settings.timeout_ms)
+        try:
+            return await self._probe_impl(host, port, should_continue=should_continue,
+                                          excluded_hosts=excluded_hosts, excluded_cidrs=excluded_cidrs,
+                                          dns_servers=dns_servers, ping_count=ping_count,
+                                          tcp_attempts=tcp_attempts)
+        finally:
+            _PROBE_TIMEOUT_MS.reset(token)
+
+    async def _probe_impl(self, host, port, should_continue=None, excluded_hosts=(), excluded_cidrs=(),
+                          dns_servers=DEFAULT_DNS_SERVERS, ping_count=DEFAULT_PING_COUNT,
+                          tcp_attempts=DEFAULT_TCP_ATTEMPTS):
         try:
             literal_address = ipaddress.ip_address(host)
         except ValueError:
@@ -674,9 +744,10 @@ class ProbeEngine:
                     result["tcp"].append({"address": address, "port": tcp_port, "elapsedMs": 0, **skipped})
                 continue
             # Every actual operation receives the already-checked numeric address.
-            result["ping"].append(await self._io(lambda address=address: self._ping(address), should_continue))
+            # Ping/TCP attempts are individually rate-limited and counted.
+            result["ping"].append(await self._ping_with_retries(address, ping_count, should_continue))
             for tcp_port in tcp_ports:
-                result["tcp"].append(await self._io(lambda address=address, tcp_port=tcp_port: self._tcp(address, tcp_port), should_continue))
+                result["tcp"].append(await self._tcp_with_retries(address, tcp_port, tcp_attempts, should_continue))
         return result
 
 
@@ -760,6 +831,10 @@ def create_app(settings=None, policy=None, engine=None, logger=None, intelligenc
                 "domainNslookup": True, "domainPing": True,
                 "domainDnsFallback": True, "customDnsServers": True, "dnsServers": list(DEFAULT_DNS_SERVERS),
                 "k01Intelligence": True, "k01PasswordChange": True,
+                "probeSettings": True,
+                "defaultPingCount": DEFAULT_PING_COUNT,
+                "defaultTcpAttempts": DEFAULT_TCP_ATTEMPTS,
+                "defaultProbeTimeoutMs": DEFAULT_PROBE_TIMEOUT_MS,
                 "domainDefaultPorts": list(DOMAIN_DEFAULT_PORTS),
                 "dnsExcluded": True, "excludedDnsAddresses": len(policy.dns_addresses)})
 
