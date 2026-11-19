@@ -127,6 +127,16 @@ def current_trace_id():
     return _TRACE_ID.get()
 
 
+# Build stamp injected by service.py. Every K01 payload carries it so an operator can
+# tell from the userscript log alone which exe actually answered a query.
+_SERVICE_VERSION = ""
+
+
+def set_service_version(version):
+    global _SERVICE_VERSION
+    _SERVICE_VERSION = str(version or "")
+
+
 class K01Error(Exception):
     def __init__(self, code, message, status=502, *, reason=None, fallback=False,
                  stage=None, diagnostic_code=None, diagnostic=None, upstream_status=None):
@@ -142,6 +152,8 @@ class K01Error(Exception):
     def payload(self):
         value = {"success": False, "code": self.code, "message": self.message,
                  "fallbackAllowed": self.fallback, "authSource": "api-account"}
+        if _SERVICE_VERSION:
+            value["serviceVersion"] = _SERVICE_VERSION
         if self.reason:
             value["reason"] = self.reason
         # Transport forensics must reach the userscript: the local log alone cannot be
@@ -883,6 +895,7 @@ class K01IntelligenceClient:
                                 "dataType": type(body.get("data")).__name__,
                                 "message": _diagnostic_text(str(body.get("msg", ""))[:160], config, bearer)}))
             result = {"success": True, "host": host, "authSource": "api-account",
+                      "serviceVersion": _SERVICE_VERSION,
                       "queriedAt": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
                       "elapsedMs": round((self.clock() - started) * 1000), "cacheHit": False,
                       "data": scrub(body["data"], (config.password, bearer, self.pairing_token))}

@@ -604,7 +604,30 @@ class HttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(value["authSource"], "api-account")
         self.assertEqual(value["host"], "example.invalid")
         self.assertEqual(value["data"]["base_info"]["malice_num"], 1)
+        # The answering build travels with the payload so a stale exe is visible client side.
+        self.assertEqual(value["serviceVersion"], service.SERVICE_VERSION)
         self.assertFalse(self.app.state.engine.jobs)
+
+
+class ServiceVersionStampTests(unittest.TestCase):
+    """Every K01 payload names the probe build that produced it."""
+
+    def tearDown(self):
+        k01.set_service_version(service.SERVICE_VERSION)
+
+    def test_error_payload_carries_service_version(self):
+        k01.set_service_version("9.9.9-test")
+        error = k01.K01Error("K01_CONNECTION_ERROR", "boom", 502, fallback=True)
+        self.assertEqual(error.payload()["serviceVersion"], "9.9.9-test")
+
+    def test_payload_omits_version_when_unset(self):
+        k01.set_service_version("")
+        self.assertNotIn("serviceVersion", k01.K01Error("K01_BUSY", "boom", 429).payload())
+
+    def test_startup_banner_names_the_build(self):
+        stream = io.StringIO()
+        service.print_banner(stream)
+        self.assertIn(service.SERVICE_VERSION, stream.getvalue())
 
 
 class OsTlsFallbackTests(unittest.TestCase):

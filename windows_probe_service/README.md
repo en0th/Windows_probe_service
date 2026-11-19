@@ -1,6 +1,6 @@
 # SOAR Windows 本地连通性服务
 
-本服务 v1.6.1 配合当前工作台脚本使用，支持 K01 威胁情报查询。原有 IPv4、域名 DNS/Ping/TCP 探测继续兼容 v21.0 及更新脚本。查询成功后，探测结果显示在已有表格中；情报查询通过目标旁独立图标打开详情抽屉。网络探测和情报查询均独立于告警处置判断。
+本服务 v1.6.2 配合当前工作台脚本使用，支持 K01 威胁情报查询。原有 IPv4、域名 DNS/Ping/TCP 探测继续兼容 v21.0 及更新脚本。查询成功后，探测结果显示在已有表格中；情报查询通过目标旁独立图标打开详情抽屉。网络探测和情报查询均独立于告警处置判断。
 
 **仅探测公网 IPv4，排除已知 CDN/WAF、DNS 服务器、内网和特殊地址。** IPv6、`0.0.0.0`、回环、链路本地、组播、保留和特殊用途地址直接跳过。域名只查询 A 记录并检查 CNAME，服务端逐个检查解析出的 IPv4，随后只向已检查的数字 IPv4 发起检测；不会再次解析域名后直接连接。
 
@@ -40,13 +40,14 @@ v1.3.0 已从依赖与发布包中移除 `_pydantic_core`，解决旧版本仍�
 独立程序还支持这些命令，均不依赖外部 Python：
 
 ```powershell
+.\SOARProbe.exe --version
 .\SOARProbe.exe --copy-token
 .\SOARProbe.exe --show-token
 .\SOARProbe.exe --self-test
 .\SOARProbe.exe --update-cdn-rules
 ```
 
-`--show-token` 只在显式调用时显示令牌；`--self-test` 不创建配置、不发起 DNS/ICMP/TCP 探测，会报告 HTTP/校验实现与 CPython 运行时位置，并确认未打包 Pydantic Core；更新 CDN 规则需要联网，成功后保存到用户数据目录并在下次启动时生效。损坏的覆盖规则会阻止服务启动，避免无规则探测。日志和配置均不写入程序文件夹或单文件版的临时解包目录。
+`--version` 只打印构建版本后退出；`--show-token` 只在显式调用时显示令牌；`--self-test` 不创建配置、不发起 DNS/ICMP/TCP 探测，会报告 HTTP/校验实现与 CPython 运行时位置，并确认未打包 Pydantic Core；更新 CDN 规则需要联网，成功后保存到用户数据目录并在下次启动时生效。损坏的覆盖规则会阻止服务启动，避免无规则探测。日志和配置均不写入程序文件夹或单文件版的临时解包目录。
 
 **源码包与发布包不同。** 当前源码包提供下面的 Windows 构建流程；如果目录中没有 `SOARProbe.exe`，需先在 Windows 构建。不能把源码 ZIP 或其他系统生成的二进制当成 Windows EXE。
 
@@ -63,7 +64,7 @@ v1.3.0 已从依赖与发布包中移除 `_pydantic_core`，解决旧版本仍�
 
 1. 将构建包中的 `windows_probe_service` 文件夹和 `.github` 文件夹上传到自己的仓库，保持目录层级。
 2. 在仓库 **Actions → Build Windows probe EXE → Run workflow** 手动运行。
-3. 构建成功后下载 `SOARProbe-Windows-x64` artifact，解压获得 EXE、两种发布 ZIP 和校验文件。需要发布 GitHub Release 时，在 `release_tag` 填写与服务版本一致的标签（例如 `v1.6.1`）；留空只构建。
+3. 构建成功后下载 `SOARProbe-Windows-x64` artifact，解压获得 EXE、两种发布 ZIP 和校验文件。需要发布 GitHub Release 时，在 `release_tag` 填写与服务版本一致的标签（例如 `v1.5.1`）；留空只构建。
 
 上传范围仅需构建包内容，不要上传本机配置、令牌或诊断日志。工作流仅手动触发；只有显式填写 `release_tag` 时，独立发布任务才获得写权限，在 Windows 构建、自检和校验成功后上传 Release 附件。用于发布的仓库还需包含 `RELEASE_NOTES.md`。
 
@@ -223,18 +224,18 @@ Windows Ping 使用原生 IPv4 `IcmpSendEcho`，不解析中英文 `ping.exe` �
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-134 项离线测试通过模拟 DNS、ICMP、TCP 和本地 HTTP ASGI 请求检查自定义 DNS 顺序、仅系统模式、解析服务器排除、配置快照与缓存隔离，以及策略、队列、去重、取消和协议，包括认证顺序、严格 JSON/类型校验及正文大小限制，不向真实目标发起网络探测。GitHub Actions 在 Windows 上执行测试，并实际启动生成的两种 EXE 验证冻结资源、依赖移除、健康接口和令牌认证；便携 ZIP 会完整解压后再次验证。构建环境不复现部署机器的 Smart App Control 策略，测试通过不等同于已获得该机器的策略批准。实际目标的网络可达性取决于部署机器；详细证据记录在日志中。
+176 项离线测试通过模拟 DNS、ICMP、TCP 和本地 HTTP ASGI 请求检查自定义 DNS 顺序、仅系统模式、解析服务器排除、配置快照与缓存隔离，以及策略、队列、去重、取消和协议，包括认证顺序、严格 JSON/类型校验及正文大小限制，不向真实目标发起网络探测。GitHub Actions 在 Windows 上执行测试，并实际启动生成的两种 EXE 验证冻结资源、依赖移除、健康接口和令牌认证；便携 ZIP 会完整解压后再次验证。构建环境不复现部署机器的 Smart App Control 策略，测试通过不等同于已获得该机器的策略批准。实际目标的网络可达性取决于部署机器；详细证据记录在日志中。
 
 
-## K01 威胁情报（v1.6.0）
+## K01 威胁情报（v1.6.2）
 
 脚本 v25.5 在 IPv4、域名复制按钮旁提供独立情报图标，点击打开详情抽屉。先在脚本设置中配置本地服务连接，再配置 K01 HTTPS 地址和 API 组账号。API 用户通过 `/api/cms/user/login` 获取访问令牌，资源请求使用 Bearer 调用 `/api/v1/threatintelligence/api/traceability`。账户配置保存在现有用户数据目录 `config.json` 的 `k01` 字段，现有配对令牌和探测配置保留。密码字段留空保留原密码，“清除已保存密码”明确清除。API 密码与访问令牌不随配置查询返回。
 
 默认校验 K01 HTTPS 证书；可在更多设置填写 CA PEM 路径。需要兼容不受信任证书时，可显式勾选“忽略证书校验（不安全）”，该设置仅影响 K01 API 上游 TLS 证书与主机名校验，TLS 加密仍开启。关闭校验可能连接到伪装的 K01 服务并暴露 API 凭据，只建议在受控网络临时使用。默认仍校验。上游只使用保存的站点及两条固定接口，禁止跨站重定向。没有新增第三方依赖。
 
-部分 K01 网关会在收到请求体后要求 TLS 重协商。OpenSSL 3.x 客户端（CPython 3.11 自带）无法完成该重协商，连接会被对端直接关闭，表现为“请求已发出、31 ms 内连接断开”，与证书和超时无关。v1.6.1 起，服务识别这类断连后改用系统 TLS 栈（Windows schannel，调用系统自带 `curl.exe`）重放同一请求一次，请求头与请求体经仅本进程可读的临时文件传递、不进入命令行，重放结束立即删除；诊断日志 `diagnostic.transport` 标记实际通道（`urllib` 或 `os-tls`）。如需关闭该重放，设置环境变量 `SOAR_K01_CURL_FALLBACK=0`。
+SOARProbe 启动时第一行就打印构建版本（`SOARProbe v<版本> (API v1)`，写到 stderr 以保持 `--self-test` 等命令的 stdout 是纯 JSON），窗口标题同时显示版本与监听端口，`service_started` 日志记录 `serviceVersion`；`GET /health` 返回 `version`（服务版本）和 `apiVersion`（接口版本）。
 
-SOARProbe 启动控制台与 `service_started` 日志会显示当前服务构建版本；`GET /health` 返回 `version`（服务版本）和 `apiVersion`（接口版本）。
+K01 的每个响应（成功和失败）都带 `serviceVersion`，脚本日志与导出 JSON 一并记录，面板显示 `probe v<版本>`。**排查“改了好像没生效”时先看这个字段**：显示“probe 版本未知”或与发布标签不一致，说明该机器上跑的还是旧 EXE，需要替换 exe 后重启服务。
 
 账号未配置、API 登录拒绝或正式接口不可用时，本地服务返回 `K01_FRONTEND_REQUIRED`。启用脚本的网页登录兜底，并保持已登录且已加载情报检索的 K01 标签页，脚本在该页面内调用原站请求函数或该页面自身可用的访问令牌。会话认证由浏览器执行；本服务不读取、接收或保存网页登录 Cookie、JWT 和签名。结果标记实际认证来源。
 

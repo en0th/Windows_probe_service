@@ -37,12 +37,14 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from network_policy import NetworkPolicy
 from probe_models import DEFAULT_DNS_SERVERS, MAX_TARGETS, ProbeBatch, ProbeTarget, ValidationError, normalize_host
 from k01_intelligence import (K01IntelligenceClient, K01Error, new_trace_id, normalize_trace_id,
-                              reset_trace_id, set_trace_id,
+                              reset_trace_id, set_trace_id, set_service_version,
                               config_from_payload as k01_config_from_payload)
 import windows_icmp
 
 API_VERSION = 1
-SERVICE_VERSION = "1.6.1"
+SERVICE_VERSION = "1.6.2"
+# K01 payloads are stamped with this build so the userscript log names the exe that answered.
+set_service_version(SERVICE_VERSION)
 MAX_DNS_ADDRESSES = 64
 DNS_RESOLVER_SEQUENCE = ("system", *DEFAULT_DNS_SERVERS)
 DOMAIN_DEFAULT_PORTS = (80, 443)
@@ -924,6 +926,23 @@ def create_app(settings=None, policy=None, engine=None, logger=None, intelligenc
     return app
 
 
+def print_banner(stream=None):
+    """Startup build stamp. Goes to stderr so stdout stays machine-readable (--self-test)."""
+    print(f"SOARProbe v{SERVICE_VERSION} (API v{API_VERSION})",
+          file=stream or sys.stderr, flush=True)
+
+
+def set_console_title(text):
+    """Also show the version in the console window title, which survives output scrolling."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetConsoleTitleW(text)
+    except Exception:
+        pass
+
+
 def main():
     parser = argparse.ArgumentParser(description="SOAR Windows localhost probe service")
     parser.add_argument("--init-config", action="store_true", help="create/validate persistent configuration and exit")
@@ -933,7 +952,14 @@ def main():
     parser.add_argument("--update-cdn-rules", action="store_true", help="download and validate a persistent CDN rules update, then exit")
     parser.add_argument("--no-interactive", action="store_true", help="disable console hotkeys and error pause for automation")
     parser.add_argument("--data-dir", type=Path, help="override configuration/log directory")
+    parser.add_argument("--version", action="store_true", help="print the service version and exit")
     args = parser.parse_args()
+    # Stamp the version before configuration is read so it is still visible when startup
+    # fails later (invalid config, occupied port, application-control block).
+    print_banner()
+    if args.version:
+        print(f"SOARProbe v{SERVICE_VERSION} (API v{API_VERSION})")
+        return
     if args.self_test:
         print(json.dumps(run_self_test(), ensure_ascii=False))
         return
@@ -968,7 +994,7 @@ def main():
     if os.name != "nt":
         raise SystemExit("This probe service runs on Windows only. Offline tests can run on other platforms.")
     import uvicorn
-    print(f"SOARProbe v{SERVICE_VERSION} (API v{API_VERSION})")
+    set_console_title(f"SOARProbe v{SERVICE_VERSION} · 127.0.0.1:{settings.port}")
     print(f"SOAR probe: http://127.0.0.1:{settings.port} (Ctrl+C to stop)")
     print(f"Config: {settings.data_dir / 'config.json'}")
     print("[C] Copy pairing token  [L] Open logs  [Q] Quit (or Ctrl+C)")
@@ -990,7 +1016,7 @@ def launch():
             return 0
         # Pause only for the standalone double-click experience. CLI and build
         # checks must terminate deterministically instead of waiting for input.
-        print(f"SOAR probe startup failed: {error}", file=sys.stderr)
+        print(f"SOARProbe v{SERVICE_VERSION} startup failed: {error}", file=sys.stderr)
         if (getattr(sys, "frozen", False) and len(sys.argv) == 1
                 and os.environ.get("SOAR_PROBE_CMD_LAUNCH") != "1"
                 and getattr(sys.stdin, "isatty", lambda: False)()):
