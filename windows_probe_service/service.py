@@ -37,15 +37,15 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from network_policy import NetworkPolicy
 from probe_models import (DEFAULT_DNS_SERVERS, DEFAULT_PING_COUNT, DEFAULT_PROBE_TIMEOUT_MS,
-                            DEFAULT_TCP_ATTEMPTS, MAX_TARGETS, ProbeBatch, ProbeTarget,
-                            ValidationError, normalize_host)
+                            DEFAULT_SKIP_CDN, DEFAULT_TCP_ATTEMPTS, MAX_TARGETS, ProbeBatch,
+                            ProbeTarget, ValidationError, normalize_host)
 from k01_intelligence import (K01IntelligenceClient, K01Error, new_trace_id, normalize_trace_id,
                               reset_trace_id, set_trace_id, set_service_version,
                               config_from_payload as k01_config_from_payload)
 import windows_icmp
 
 API_VERSION = 1
-SERVICE_VERSION = "1.6.11"
+SERVICE_VERSION = "1.6.12"
 # K01 payloads are stamped with this build so the userscript log names the exe that answered.
 set_service_version(SERVICE_VERSION)
 MAX_DNS_ADDRESSES = 64
@@ -111,7 +111,8 @@ def run_self_test() -> dict:
             "apiVersion": API_VERSION, "frozen": frozen, "bundleLayout": bundle_layout,
             "httpStack": "starlette", "validationImplementation": "python",
             "pydanticCoreBundled": False,
-            "k01Intelligence": True,
+            "k01Intelligence": True, "k01PasswordChange": True,
+            "probeSettings": True, "cdnSkipConfigurable": True,
             "customDnsServers": True, "dnsServers": list(DEFAULT_DNS_SERVERS),
             "nativeDependencies": {"pythonRuntime": str(python_runtime)},
             "ipv4Only": True, "cdnRulesVersion": policy.version,
@@ -305,6 +306,7 @@ class Entry:
     ping_count: int = DEFAULT_PING_COUNT
     tcp_attempts: int = DEFAULT_TCP_ATTEMPTS
     timeout_ms: int = DEFAULT_PROBE_TIMEOUT_MS
+    skip_cdn: bool = DEFAULT_SKIP_CDN
     watchers: list = field(default_factory=list)
     started: bool = False
 
@@ -406,9 +408,10 @@ class ProbeEngine:
         excluded_cidrs = tuple(sorted(batch.excludedCidrs))
         dns_servers = tuple(batch.dnsServers)
         ping_count, tcp_attempts, timeout_ms = batch.pingCount, batch.tcpAttempts, batch.timeoutMs
+        skip_cdn = batch.skipCdn
         def target_key(target):
             return (target.host, target.port, exclusions, excluded_cidrs, dns_servers,
-                    ping_count, tcp_attempts, timeout_ms)
+                    ping_count, tcp_attempts, timeout_ms, skip_cdn)
         new_keys = {target_key(t) for t in batch.targets} - self.inflight.keys() - self.cache.keys()
         if self.queue.qsize() + len(new_keys) > self.settings.queue_size:
             raise CapacityError("probe_queue_full")
@@ -424,14 +427,15 @@ class ProbeEngine:
                 entry = Entry(key, target.host, target.port, excluded_hosts=exclusions,
                               excluded_cidrs=excluded_cidrs, dns_servers=dns_servers,
                               ping_count=ping_count, tcp_attempts=tcp_attempts,
-                              timeout_ms=timeout_ms)
+                              timeout_ms=timeout_ms, skip_cdn=skip_cdn)
                 self.inflight[key] = entry
                 self.queue.put_nowait(entry)
             self.inflight[key].watchers.append((job.id, target))
         self.log("job_submitted", jobId=job.id, queryId=job.query_id, total=job.total,
                  uniqueTargets=len({(t.host, t.port) for t in batch.targets}),
                  excludedHosts=list(exclusions), excludedCidrs=list(excluded_cidrs), dnsServers=list(dns_servers),
-                 pingCount=ping_count, tcpAttempts=tcp_attempts, timeoutMs=timeout_ms)
+                 pingCount=ping_count, tcpAttempts=tcp_attempts, timeoutMs=timeout_ms,
+                 skipCdn=skip_cdn)
         return job
 
     def cancel(self, job_id):
@@ -481,7 +485,8 @@ class ProbeEngine:
                     result = await self.probe(entry.host, entry.port, should_continue=lambda: bool(entry.watchers),
                                               excluded_hosts=entry.excluded_hosts, excluded_cidrs=entry.excluded_cidrs,
                                               dns_servers=entry.dns_servers, ping_count=entry.ping_count,
-                                              tcp_attempts=entry.tcp_attempts, timeout_ms=entry.timeout_ms)
+                                              tcp_attempts=entry.tcp_attempts, timeout_ms=entry.timeout_ms,
+                                              skip_cdn=entry.skip_cdn)
                 except AbandonedProbe:
                     continue
                 except Exception as exc:
@@ -650,19 +655,19 @@ class ProbeEngine:
 
     async def probe(self, host, port, should_continue=None, excluded_hosts=(), excluded_cidrs=(),
                     dns_servers=DEFAULT_DNS_SERVERS, ping_count=DEFAULT_PING_COUNT,
-                    tcp_attempts=DEFAULT_TCP_ATTEMPTS, timeout_ms=None):
+                    tcp_attempts=DEFAULT_TCP_ATTEMPTS, timeout_ms=None, skip_cdn=DEFAULT_SKIP_CDN):
         token = _PROBE_TIMEOUT_MS.set(timeout_ms if timeout_ms is not None else self.settings.timeout_ms)
         try:
             return await self._probe_impl(host, port, should_continue=should_continue,
                                           excluded_hosts=excluded_hosts, excluded_cidrs=excluded_cidrs,
                                           dns_servers=dns_servers, ping_count=ping_count,
-                                          tcp_attempts=tcp_attempts)
+                                          tcp_attempts=tcp_attempts, skip_cdn=skip_cdn)
         finally:
             _PROBE_TIMEOUT_MS.reset(token)
 
     async def _probe_impl(self, host, port, should_continue=None, excluded_hosts=(), excluded_cidrs=(),
                           dns_servers=DEFAULT_DNS_SERVERS, ping_count=DEFAULT_PING_COUNT,
-                          tcp_attempts=DEFAULT_TCP_ATTEMPTS):
+                          tcp_attempts=DEFAULT_TCP_ATTEMPTS, skip_cdn=DEFAULT_SKIP_CDN):
         try:
             literal_address = ipaddress.ip_address(host)
         except ValueError:
@@ -681,7 +686,7 @@ class ProbeEngine:
                 nslookup.update(skip)
             return {**result, "dns": {"elapsedMs": 0, **skip}, "skipped": skip}
         domain_skip = self.policy.domain(host)
-        if domain_skip:
+        if domain_skip and skip_cdn:
             if is_domain:
                 nslookup.update({"status": "skipped_cdn", **domain_skip})
             return {**result, "dns": {"status": "skipped_cdn", "elapsedMs": 0, **domain_skip},
@@ -707,7 +712,7 @@ class ProbeEngine:
                 nslookup.update(status="ok", answers=addresses[:MAX_DNS_ADDRESSES], aliases=list(aliases),
                                 elapsedMs=result["dns"]["elapsedMs"])
             alias_skip = next((self.policy.domain(alias) for alias in aliases if self.policy.domain(alias)), None)
-            if alias_skip:
+            if alias_skip and skip_cdn:
                 return {**result, "dns": {**result["dns"], "status": "skipped_cdn", **alias_skip},
                         "skipped": {"status": "skipped_cdn", **alias_skip}}
             if len(addresses) > MAX_DNS_ADDRESSES:
@@ -735,9 +740,12 @@ class ProbeEngine:
         for address in addresses:
             if should_continue is not None and not should_continue():
                 raise AbandonedProbe()
+            policy_skip = self.policy.address(address)
+            if not skip_cdn and policy_skip and policy_skip.get("status") == "skipped_cdn":
+                policy_skip = None
             skipped = ({"status": "skipped_dns", "reason": "configured_dns_server",
                         "rule": address, "source": "request.dnsServers"}
-                       if address in dns_servers else self.policy.address(address))
+                       if address in dns_servers else policy_skip)
             if skipped is None and address in excluded_hosts:
                 skipped = {"status": "skipped_custom", "reason": "custom_exclusion",
                            "rule": address, "source": "request.excludedHosts"}
@@ -840,7 +848,7 @@ def create_app(settings=None, policy=None, engine=None, logger=None, intelligenc
                 "domainNslookup": True, "domainPing": True,
                 "domainDnsFallback": True, "customDnsServers": True, "dnsServers": list(DEFAULT_DNS_SERVERS),
                 "k01Intelligence": True, "k01PasswordChange": True,
-                "probeSettings": True,
+                "probeSettings": True, "cdnSkipConfigurable": True,
                 "defaultPingCount": DEFAULT_PING_COUNT,
                 "defaultTcpAttempts": DEFAULT_TCP_ATTEMPTS,
                 "defaultProbeTimeoutMs": DEFAULT_PROBE_TIMEOUT_MS,

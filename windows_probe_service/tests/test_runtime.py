@@ -284,6 +284,36 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.engine._ping.assert_awaited_once_with(PUBLIC)
         self.engine._tcp.assert_not_called()
 
+    async def test_skip_cdn_false_probes_direct_cdn_ip_and_cdn_domain(self):
+        self.engine._ping = AsyncMock(side_effect=lambda address: {"address": address, "status": "reachable"})
+        self.engine._tcp = AsyncMock(side_effect=lambda address, port: {"address": address, "port": port, "status": "open"})
+        direct = await self.engine.probe(OTHER, 443, ping_count=1, tcp_attempts=1, skip_cdn=False)
+        self.assertEqual(direct["ping"][0]["status"], "reachable")
+        self.assertEqual(direct["tcp"][0]["status"], "open")
+        self.engine._resolve = AsyncMock(return_value=(["104.16.1.2"], []))
+        domain = await self.engine.probe("a.edge.example.invalid", 443, ping_count=1, tcp_attempts=1, skip_cdn=False)
+        self.assertEqual(domain["dns"]["status"], "ok")
+        self.assertEqual(domain["ping"][0]["status"], "reachable")
+        self.assertEqual(domain["tcp"][0]["status"], "open")
+        # The default remains skip-on.
+        self.engine._resolve = AsyncMock(return_value=(["104.16.1.2"], []))
+        skipped = await self.engine.probe("a.edge.example.invalid", 443, ping_count=1, tcp_attempts=1)
+        self.assertEqual(skipped["dns"]["status"], "skipped_cdn")
+
+    async def test_skip_cdn_setting_isolates_cache_and_inflight_work(self):
+        self.engine.probe = AsyncMock(return_value={"resolved": [PUBLIC], "dns": {"status": "ok"}, "ping": [], "tcp": []})
+        on = self.engine.submit(batch(skipCdn=True))
+        off = self.engine.submit(batch(skipCdn=False))
+        self.assertEqual(len(self.engine.inflight), 2)
+        await self.engine.start()
+        await asyncio.wait_for(self.engine.queue.join(), 1)
+        self.assertEqual(self.engine.probe.await_count, 2)
+        self.assertEqual({call.kwargs["skip_cdn"] for call in self.engine.probe.await_args_list}, {True, False})
+        cached_on = self.engine.submit(batch(skipCdn=True))
+        await asyncio.wait_for(self.engine.queue.join(), 1)
+        self.assertEqual(self.engine.probe.await_count, 2)
+        self.assertTrue(self.engine.snapshot(cached_on.id)["results"][0]["cached"])
+
     async def test_queue_dedup_cache_and_incremental_cursor(self):
         self.engine.probe = AsyncMock(return_value={"resolved": [PUBLIC], "dns": {"status": "ok"}, "ping": [], "tcp": []})
         await self.engine.start()

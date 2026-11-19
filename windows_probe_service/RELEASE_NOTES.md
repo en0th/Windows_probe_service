@@ -1,5 +1,12 @@
 # 发布说明
 
+## v1.6.12
+
+- **新增 CDN 跳过的显性开关**：`/v1/probes` 增加可选布尔字段 `skipCdn`，默认 `true`，保持原来的 CDN/WAF 跳过行为；显式传 `false` 时忽略 CDN 域名、CNAME 和 CDN IP 网段判定，继续对目标执行 Ping/TCP，但安全过滤、私网、DNS、自定义排除等规则仍然生效。
+- `/health` 和 `--self-test` 新增 `cdnSkipConfigurable: true`；字段参与缓存、共享任务和 inflight 隔离。Windows 构建 smoke test 同时校验该能力。
+- 工作台脚本 v25.22：网络探测配置新增“命中 CDN/WAF 时跳过 Ping/TCP 探测”复选框，默认勾选；设置随任务下发。
+- 离线测试增至 192 项。
+
 ## v1.6.11
 
 - 修复 v1.6.10 的 Windows 构建自检：构建脚本中的默认 DNS 校验同步为 `8.8.8.8,223.5.5.5,223.6.6.6,180.76.76.76`。v1.6.10 的功能代码不变。
