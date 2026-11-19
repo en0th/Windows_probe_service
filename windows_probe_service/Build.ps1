@@ -65,7 +65,7 @@ function Test-BundledExecutable {
     $selfTest = ($selfTestLines -join "`n") | ConvertFrom-Json
     if ($selfTest.status -ne 'ok' -or $selfTest.frozen -ne $true -or $selfTest.bundleLayout -ne $Layout) { throw 'The EXE did not confirm bundled runtime/resources in its self-test.' }
     if ($selfTest.httpStack -ne 'starlette' -or $selfTest.validationImplementation -ne 'python' -or $selfTest.pydanticCoreBundled -isnot [bool] -or $selfTest.pydanticCoreBundled -ne $false) { throw 'The EXE did not confirm the Starlette/Python implementation without pydantic_core.' }
-    if ($selfTest.customDnsServers -ne $true -or ($selfTest.dnsServers -join ',') -ne '8.8.8.8,223.5.5.5') { throw 'The EXE self-test did not confirm configurable DNS support.' }
+    if ($selfTest.customDnsServers -ne $true -or ($selfTest.dnsServers -join ',') -ne '8.8.8.8,223.5.5.5,223.6.6.6,180.76.76.76') { throw 'The EXE self-test did not confirm configurable DNS support.' }
     if ($selfTest.k01Intelligence -ne $true) { throw 'The EXE self-test did not confirm K01 intelligence support.' }
 
     if ($Layout -eq 'onedir') {
@@ -110,7 +110,7 @@ function Test-BundledExecutable {
         }
         if ($null -eq $health -or $health.status -ne 'ok' -or $health.platform -ne 'windows' -or $health.ipv4Only -ne $true) { throw 'The bundled Windows IPv4 service did not become healthy.' }
         if ($health.domainNslookup -ne $true -or $health.domainPing -ne $true -or $health.domainDnsFallback -ne $true -or ($health.domainDefaultPorts -join ',') -ne '80,443') { throw 'The bundled service is missing domain DNS fallback or default TCP ports.' }
-        if ($health.customDnsServers -ne $true -or ($health.dnsServers -join ',') -ne '8.8.8.8,223.5.5.5') { throw 'The bundled service is missing configurable DNS capability.' }
+        if ($health.customDnsServers -ne $true -or ($health.dnsServers -join ',') -ne '8.8.8.8,223.5.5.5,223.6.6.6,180.76.76.76') { throw 'The bundled service is missing configurable DNS capability.' }
         if ($health.k01Intelligence -ne $true) { throw 'The bundled service is missing K01 intelligence capability.' }
         $auth = Invoke-RestMethod -Uri ($smokeUrl + '/v1/auth-check') -Headers @{ Authorization = 'Bearer ' + $smokeConfig.token } -TimeoutSec 3
         if ($auth.status -ne 'ok' -or $auth.apiVersion -ne 1) { throw 'The bundled service failed its authenticated check.' }
