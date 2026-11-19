@@ -35,6 +35,7 @@ from probe_models import normalize_host
 
 
 LOGIN_PATH = "/api/cms/user/login"
+CHANGE_PASSWORD_PATH = "/api/v1/account/changepwd"
 TRACE_PATH = "/api/v1/threatintelligence/api/traceability"
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_CACHE_BYTES = 32 * 1024 * 1024
@@ -69,6 +70,14 @@ _RENEGOTIATION_ERRORS = (
 
 # Actionable hints keyed by transport diagnostic code; appended to the caller-facing
 # message so the userscript log alone is enough to tell the failure classes apart.
+# K01 business rejections that have a specific operator action. Mapping these to
+# ``K01_FRONTEND_REQUIRED`` also lets a configured, already-logged-in K01 page
+# serve the query through the session fallback instead of leaving the operator
+# with the generic "query rejected" message.
+_QUERY_RECOVERY = {
+    10140: ("api_initial_password_required", "initial_password_not_changed"),
+}
+
 _TRANSPORT_HINTS = {
     "certificate_verification_failed":
         "（证书校验失败：请为该 K01 目标配置可信 CA 文件，或关闭 TLS 校验以信任内网自签证书。）",
@@ -180,6 +189,7 @@ def frontend_required(reason):
         "api_login_unavailable": "当前 K01 未提供此 API 登录接口，请使用已登录的 K01 页面查询。",
         "api_access_denied": "API 账号无权查询此情报，请使用已登录的 K01 页面查询。",
         "api_endpoint_unavailable": "当前 K01 未提供此正式溯源接口，请使用已登录的 K01 页面查询。",
+        "api_initial_password_required": "K01 API 账号仍使用初始密码，请先在 K01 网页端使用该账号登录并修改初始密码，再在本地服务配置中更新 API 密码后重试。",
     }
     return K01Error("K01_FRONTEND_REQUIRED", messages[reason], 409,
                     reason=reason, fallback=True)
@@ -287,6 +297,22 @@ def validate_trace_payload(payload):
     if type(count) is not int or count not in COUNTS or type(force) is not bool:
         raise ValueError("invalid K01 query")
     return host, count, force
+
+
+def validate_change_password_payload(payload):
+    """Validate the one-time K01 API-account password change request.
+
+    The old password is deliberately not accepted from the browser; it is read
+    from the local service's protected configuration and never echoed back.
+    """
+    if not isinstance(payload, dict) or set(payload) != {"newPassword", "confirmPassword"}:
+        raise ValueError("invalid K01 password change")
+    new_password, confirm_password = payload.get("newPassword"), payload.get("confirmPassword")
+    if not isinstance(new_password, str) or not isinstance(confirm_password, str):
+        raise ValueError("invalid K01 password change")
+    if not 8 <= len(new_password) <= 16 or new_password != confirm_password:
+        raise ValueError("invalid K01 password change")
+    return new_password
 
 
 def scrub(value, secrets=(), depth=0):
@@ -629,6 +655,11 @@ def _post_with_os_tls(config, path, payload_bytes, bearer):
                  "Content-Type: application/json; charset=utf-8"]
         if bearer:
             lines.append("Authorization: Bearer " + bearer)
+            # The K01 web frontend sends the same token in this legacy header for
+            # account operations; send it in addition to the documented bearer
+            # header so /account/changepwd works on both API and frontend builds.
+            if path == CHANGE_PASSWORD_PATH:
+                lines.append("access_token: " + bearer)
         for name, content in ((header_file, ("\n".join(lines) + "\n").encode("utf-8")),
                               (payload_file, payload_bytes),
                               (header_out, b""),
@@ -659,9 +690,10 @@ def _post_with_os_tls(config, path, payload_bytes, bearer):
 
 
 def _blocking_post(config, path, payload, bearer, *, stage=None):
-    if path not in {LOGIN_PATH, TRACE_PATH}:
+    if path not in {LOGIN_PATH, CHANGE_PASSWORD_PATH, TRACE_PATH}:
         raise ValueError("undocumented K01 endpoint")
-    stage = stage or ("login" if path == LOGIN_PATH else "trace")
+    stage = stage or ("login" if path == LOGIN_PATH else
+                      "change-password" if path == CHANGE_PASSWORD_PATH else "trace")
     started = time.monotonic()
     request_started = False
     _TRANSPORT.set("urllib")
@@ -671,6 +703,8 @@ def _blocking_post(config, path, payload, bearer, *, stage=None):
         headers = {"Accept": "application/json", "Content-Type": "application/json; charset=utf-8"}
         if bearer:
             headers["Authorization"] = "Bearer " + bearer
+            if path == CHANGE_PASSWORD_PATH:
+                headers["access_token"] = bearer
         request = Request(config.base_url + path,
                           data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                           headers=headers, method="POST")
@@ -901,6 +935,63 @@ class K01IntelligenceClient:
                 self.token = (revision, token, self.clock() + 900)
             return token
 
+    async def change_password(self, payload):
+        """Change the configured K01 API password, then persist the new value.
+
+        K01 rejects all intelligence queries with error_code 10140 while an API
+        account still uses its initial password. The browser only supplies the
+        new password; the saved API password is used as ``oldpwd`` and is never
+        returned to the caller. Changing the password is an explicit user action
+        and is never triggered automatically by a failed query.
+        """
+        new_password = validate_change_password_payload(payload)
+        config, revision = self.config, self.revision
+        if not config.configured:
+            raise frontend_required("api_not_configured")
+        bearer = await self._get_token(config, revision)
+        reply = await self.transport(config, CHANGE_PASSWORD_PATH, {
+            "username": config.username,
+            "oldpwd": config.password,
+            "newpwd": new_password,
+            "confirmpwd": new_password,
+        }, bearer)
+        if reply.status in {404, 405}:
+            raise _with_reply(K01Error("K01_PASSWORD_CHANGE_UNAVAILABLE",
+                                       "当前 K01 未提供修改密码接口，请使用 K01 网页端修改。", 409),
+                              reply)
+        body = reply.data if isinstance(reply.data, dict) else {}
+        upstream_message = _diagnostic_text(str(body.get("msg", ""))[:160], config, bearer)
+        if new_password:
+            upstream_message = upstream_message.replace(new_password, "[REDACTED]")
+        error_code = body.get("error_code", 0)
+        success = reply.status == 200 and body.get("success") is True and error_code == 0
+        if not success:
+            error = K01Error("K01_PASSWORD_CHANGE_FAILED",
+                             "K01 修改密码失败，请检查旧密码和新密码要求。", 502)
+            if upstream_message:
+                error.message = f"{error.message}（上游返回：{upstream_message}）"
+            raise _with_reply(error, Reply(
+                reply.status, None, diagnostic_code="password_change_rejected",
+                stage="change-password", elapsed_ms=getattr(reply, "elapsed_ms", 0),
+                diagnostic={"httpStatus": reply.status,
+                            "successFlag": repr(body.get("success"))[:16],
+                            "errorCode": error_code if type(error_code) is int else repr(error_code)[:24],
+                            "message": upstream_message}))
+        if revision != self.revision:
+            raise K01Error("K01_PASSWORD_CHANGED_CONFIG_SAVE_FAILED",
+                           "K01 密码已修改，但本地配置在此期间被更新；请立即在 K01 配置中手动更新新密码。",
+                           500, stage="change-password")
+        try:
+            self.update_config({"password": new_password})
+        except (OSError, ValueError) as exc:
+            raise K01Error("K01_PASSWORD_CHANGED_CONFIG_SAVE_FAILED",
+                           "K01 密码已修改，但本地保存新密码失败；请立即在 K01 配置中手动更新新密码。",
+                           500, stage="change-password") from exc
+        self._log("k01-password-changed", usernameConfigured=True,
+                  passwordChanged=True, upstreamStatus=reply.status)
+        return {"success": True, "message": "K01 API 密码已修改并保存，将重新查询。",
+                "passwordChanged": True, "config": self.public_config()["config"]}
+
     async def _query(self, config, revision, host, count):
         if self.semaphore is None:
             self.semaphore = asyncio.Semaphore(2)
@@ -926,13 +1017,23 @@ class K01IntelligenceClient:
             error_code = body.get("error_code", 0)
             if (body.get("success") is not True or type(error_code) is not int or error_code != 0
                     or not isinstance(body.get("data"), dict)):
-                raise _with_reply(K01Error("K01_QUERY_ERROR", "K01 未返回成功的情报结果。"), Reply(
-                    reply.status, None, diagnostic_code="k01_query_rejected",
+                upstream_message = _diagnostic_text(str(body.get("msg", ""))[:160], config, bearer)
+                recovery = _QUERY_RECOVERY.get(error_code) if type(error_code) is int else None
+                if recovery:
+                    reason, diagnostic_code = recovery
+                    error = frontend_required(reason)
+                else:
+                    diagnostic_code = "k01_query_rejected"
+                    error = K01Error("K01_QUERY_ERROR", "K01 未返回成功的情报结果。")
+                if upstream_message:
+                    error.message = f"{error.message}（上游返回：{upstream_message}）"
+                raise _with_reply(error, Reply(
+                    reply.status, None, diagnostic_code=diagnostic_code,
                     stage="trace", elapsed_ms=getattr(reply, "elapsed_ms", 0),
                     diagnostic={"httpStatus": reply.status, "successFlag": repr(body.get("success"))[:16],
                                 "errorCode": error_code if type(error_code) is int else repr(error_code)[:24],
                                 "dataType": type(body.get("data")).__name__,
-                                "message": _diagnostic_text(str(body.get("msg", ""))[:160], config, bearer)}))
+                                "message": upstream_message}))
             result = {"success": True, "host": host, "authSource": "api-account",
                       "serviceVersion": _SERVICE_VERSION,
                       "queriedAt": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),

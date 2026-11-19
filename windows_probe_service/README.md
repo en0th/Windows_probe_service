@@ -1,6 +1,6 @@
 # SOAR Windows 本地连通性服务
 
-本服务 v1.6.4 配合当前工作台脚本使用，支持 K01 威胁情报查询。原有 IPv4、域名 DNS/Ping/TCP 探测继续兼容 v21.0 及更新脚本。查询成功后，探测结果显示在已有表格中；情报查询通过目标旁独立图标打开详情抽屉。网络探测和情报查询均独立于告警处置判断。
+本服务 v1.6.6 配合当前工作台脚本使用，支持 K01 威胁情报查询。原有 IPv4、域名 DNS/Ping/TCP 探测继续兼容 v21.0 及更新脚本。查询成功后，探测结果显示在已有表格中；情报查询通过目标旁独立图标打开详情抽屉。网络探测和情报查询均独立于告警处置判断。
 
 **仅探测公网 IPv4，排除已知 CDN/WAF、DNS 服务器、内网和特殊地址。** IPv6、`0.0.0.0`、回环、链路本地、组播、保留和特殊用途地址直接跳过。域名只查询 A 记录并检查 CNAME，服务端逐个检查解析出的 IPv4，随后只向已检查的数字 IPv4 发起检测；不会再次解析域名后直接连接。
 
@@ -224,12 +224,12 @@ Windows Ping 使用原生 IPv4 `IcmpSendEcho`，不解析中英文 `ping.exe` �
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-177 项离线测试通过模拟 DNS、ICMP、TCP 和本地 HTTP ASGI 请求检查自定义 DNS 顺序、仅系统模式、解析服务器排除、配置快照与缓存隔离，以及策略、队列、去重、取消和协议，包括认证顺序、严格 JSON/类型校验及正文大小限制，不向真实目标发起网络探测。GitHub Actions 在 Windows 上执行测试，并实际启动生成的两种 EXE 验证冻结资源、依赖移除、健康接口和令牌认证；便携 ZIP 会完整解压后再次验证。构建环境不复现部署机器的 Smart App Control 策略，测试通过不等同于已获得该机器的策略批准。实际目标的网络可达性取决于部署机器；详细证据记录在日志中。
+184 项离线测试通过模拟 DNS、ICMP、TCP 和本地 HTTP ASGI 请求检查自定义 DNS 顺序、仅系统模式、解析服务器排除、配置快照与缓存隔离，以及策略、队列、去重、取消和协议，包括认证顺序、严格 JSON/类型校验及正文大小限制，不向真实目标发起网络探测。GitHub Actions 在 Windows 上执行测试，并实际启动生成的两种 EXE 验证冻结资源、依赖移除、健康接口和令牌认证；便携 ZIP 会完整解压后再次验证。构建环境不复现部署机器的 Smart App Control 策略，测试通过不等同于已获得该机器的策略批准。实际目标的网络可达性取决于部署机器；详细证据记录在日志中。
 
 
-## K01 威胁情报（v1.6.4）
+## K01 威胁情报（v1.6.6）
 
-脚本 v25.5 在 IPv4、域名复制按钮旁提供独立情报图标，点击打开详情抽屉。先在脚本设置中配置本地服务连接，再配置 K01 HTTPS 地址和 API 组账号。API 用户通过 `/api/cms/user/login` 获取访问令牌，资源请求使用 Bearer 调用 `/api/v1/threatintelligence/api/traceability`。账户配置保存在现有用户数据目录 `config.json` 的 `k01` 字段，现有配对令牌和探测配置保留。密码字段留空保留原密码，“清除已保存密码”明确清除。API 密码与访问令牌不随配置查询返回。
+脚本 v25.4 在 IPv4、域名复制按钮旁提供独立情报图标，并恢复 `/soar/scripts/script` 页面的“JSON 参数”和“清空变量”工具，点击打开详情抽屉。先在脚本设置中配置本地服务连接，再配置 K01 HTTPS 地址和 API 组账号。API 用户通过 `/api/cms/user/login` 获取访问令牌，资源请求使用 Bearer 调用 `/api/v1/threatintelligence/api/traceability`。账户配置保存在现有用户数据目录 `config.json` 的 `k01` 字段，现有配对令牌和探测配置保留。密码字段留空保留原密码，“清除已保存密码”明确清除。API 密码与访问令牌不随配置查询返回。
 
 默认校验 K01 HTTPS 证书；可在更多设置填写 CA PEM 路径。需要兼容不受信任证书时，可显式勾选“忽略证书校验（不安全）”，该设置仅影响 K01 API 上游 TLS 证书与主机名校验，TLS 加密仍开启。关闭校验可能连接到伪装的 K01 服务并暴露 API 凭据，只建议在受控网络临时使用。默认仍校验。上游只使用保存的站点及两条固定接口，禁止跨站重定向。没有新增第三方依赖。
 
@@ -239,6 +239,10 @@ K01 的每个响应（成功和失败）都带 `serviceVersion`，脚本日志�
 
 账号未配置、API 登录拒绝或正式接口不可用时，本地服务返回 `K01_FRONTEND_REQUIRED`。启用脚本的网页登录兜底，并保持已登录且已加载情报检索的 K01 标签页，脚本在该页面内调用原站请求函数或该页面自身可用的访问令牌。会话认证由浏览器执行；本服务不读取、接收或保存网页登录 Cookie、JWT 和签名。结果标记实际认证来源。
 
+改密弹窗按照 `k01_website_resources` 中的 Ant Design `ant-modal` / `ant-form` / `ant-input` / `ant-btn` DOM 结构实现，并限制在独立作用域，避免与 SOAR 的 Quasar 样式冲突；`/soar/scripts/script` 工具继续使用 `website_resources` 中实际页面的 `.formily-qaxd-array-table`、`input[name=key/default/type]` 和原生 input/change 事件。
+
+如果 K01 以 `success:false`、`error_code:10140`（`The initial password has not been changed`）拒绝溯源查询，说明 API 账号仍在使用初始密码。服务返回 `K01_FRONTEND_REQUIRED`、`reason:api_initial_password_required`、`diagnosticCode:initial_password_not_changed`；工作台脚本不会对该诊断静默走会话兜底，而是在情报面板显示“修改初始密码”入口。用户输入新密码后，脚本调用本地 `POST /v1/intelligence/change-password`；服务使用已保存的旧 API 密码调用 K01 `/api/v1/account/changepwd`，成功后原子保存新密码并重新登录查询，新密码和旧密码均不出现在响应或日志中。其他业务拒绝也会附带脱敏后的上游 `msg`，便于定位原因。
+
 新增接口都沿用本地配对 Bearer 鉴权：
 
 | 方法 | 路径 | 用途 |
@@ -246,6 +250,7 @@ K01 的每个响应（成功和失败）都带 `serviceVersion`，脚本日志�
 | GET | `/v1/intelligence/status` | 读取情报能力与配置状态 |
 | GET | `/v1/intelligence/config` | 读取脱敏配置 |
 | PUT/POST | `/v1/intelligence/config` | 保存 K01 地址、API 账户、超时和缓存配置 |
+| POST | `/v1/intelligence/change-password` | 使用本地已保存的旧 API 密码修改 K01 API 初始密码，正文 `{newPassword,confirmPassword}`，成功后保存新密码 |
 | POST | `/v1/intelligence/trace` | 单个 IPv4/域名溯源，`{host,count:10,force:false}` |
 
 `success` 代表请求成功；厂商空记录、过期记录、未知结论和请求失败分开表示。每个目标的并发查询合并并短期缓存，强制刷新跳过缓存。日志只记录脱敏信息。构建会测试真实 EXE 的配置读取和未配置时的会话兜底响应，这些检查不请求 K01。

@@ -1,6 +1,6 @@
 # SOARProbe Windows IPv4 service
 
-Local Starlette ASGI service for the SOAR userscript. v1.4.0 adds per-task ordered fallback DNS configuration. It continues to use strict Python standard-library request validation without FastAPI, Pydantic or `_pydantic_core` in either Windows release layout. The API v1 contract, persistent configuration and probe engine remain compatible.
+Local Starlette ASGI service for the SOAR userscript. v1.6.6 adds K01 API initial-password change support while retaining per-task ordered fallback DNS configuration. It continues to use strict Python standard-library request validation without FastAPI, Pydantic or `_pydantic_core` in either Windows release layout. The API v1 contract, persistent configuration and probe engine remain compatible.
 
 Only public IPv4 targets are eligible. Private/special addresses, default safety rules, DNS servers, known CDN/WAF networks and custom exclusions are skipped. Domains try the system resolver, then an ordered IPv4 DNS list only when resolution fails or has no IPv4 answers. The default list is 8.8.8.8, then 223.5.5.5; an empty list uses only the system resolver. Configured DNS addresses are never Ping/TCP targets in that request, and each DNS configuration has separate cache and in-flight work. Allowed answers receive Ping and TCP checks after filtering. Explicit domain ports are checked alone; domains without a port use TCP 80 and 443. IPv4 literals without a port receive Ping only. Explicitly associated source and destination TCP ports are checked even when Ping fails.
 

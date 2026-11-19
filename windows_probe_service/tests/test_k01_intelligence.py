@@ -38,6 +38,19 @@ def result_reply(host="origin.example.invalid"):
                                    "descriptors": [{"name": "Offline supplier", "isEmpty": False}]}})
 
 
+class _SequenceTransport:
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.calls = []
+
+    async def __call__(self, config, path, payload, bearer):
+        self.calls.append((path, payload, bearer))
+        reply = self.replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+
 class ConfigTests(unittest.TestCase):
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory()
@@ -134,6 +147,17 @@ class ConfigTests(unittest.TestCase):
                         {"host": "example.invalid", "url": "https://different.invalid"}):
             with self.subTest(payload=payload), self.assertRaises(ValueError):
                 k01.validate_trace_payload(payload)
+
+    def test_change_password_payload_requires_matching_8_to_16_character_values(self):
+        valid = {"newPassword": "NewPass#2026", "confirmPassword": "NewPass#2026"}
+        self.assertEqual(k01.validate_change_password_payload(valid), "NewPass#2026")
+        for payload in ({}, {"newPassword": "short", "confirmPassword": "short"},
+                        {"newPassword": "NewPass#2026", "confirmPassword": "Different#2026"},
+                        {"newPassword": "A" * 17, "confirmPassword": "A" * 17},
+                        {"newPassword": None, "confirmPassword": None},
+                        {**valid, "oldPassword": PASSWORD}, [valid]):
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                k01.validate_change_password_payload(payload)
 
 
 class ClientTests(unittest.IsolatedAsyncioTestCase):
@@ -243,6 +267,37 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         for secret in (ACCESS, PASSWORD, PAIRING):
             self.assertNotIn(secret, output)
 
+    async def test_initial_password_query_rejection_explains_required_change(self):
+        self.configure()
+        advisory = k01.Reply(200, {"success": False, "error_code": 999, "status": "change",
+                                   "msg": "首次登录建议修改密码！",
+                                   "token": {"access_token": ACCESS,
+                                             "refresh_token": "offline-refresh-token"}})
+        rejected = k01.Reply(200, {"success": False, "error_code": 10140,
+                                   "msg": "The initial password has not been changed"})
+        self.responses = [advisory, rejected]
+        with self.assertRaises(k01.K01Error) as raised:
+            await self.client.trace({"host": "example.invalid"})
+        error = raised.exception
+        self.assertEqual(error.code, "K01_FRONTEND_REQUIRED")
+        self.assertEqual(error.reason, "api_initial_password_required")
+        self.assertEqual(error.status, 409)
+        self.assertTrue(error.fallback)
+        self.assertEqual(error.stage, "trace")
+        self.assertEqual(error.diagnostic_code, "initial_password_not_changed")
+        self.assertEqual(error.upstream_status, 200)
+        self.assertEqual(error.diagnostic["errorCode"], 10140)
+        self.assertIn("K01 网页端", error.message)
+        self.assertIn("修改初始密码", error.message)
+        self.assertIn("initial password has not been changed", error.message)
+        payload = error.payload()
+        self.assertEqual(payload["code"], "K01_FRONTEND_REQUIRED")
+        self.assertEqual(payload["reason"], "api_initial_password_required")
+        self.assertEqual(payload["diagnosticCode"], "initial_password_not_changed")
+        self.assertTrue(payload["fallbackAllowed"])
+        for secret in (ACCESS, PASSWORD, PAIRING):
+            self.assertNotIn(secret, json.dumps(payload, ensure_ascii=False))
+
     async def test_rejection_without_usable_token_is_still_a_login_failure(self):
         for body in ({"success": False, "error_code": 999, "msg": "登录用户失败：用户名或密码错误"},
                      {"success": False, "error_code": 999, "status": "change",
@@ -311,6 +366,49 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
                 await self.client.trace({"host": "example.invalid"})
             self.assertFalse(raised.exception.fallback)
             self.assertNotIn(PASSWORD, json.dumps(raised.exception.payload()))
+
+    async def test_change_password_uses_saved_old_password_and_persists_new_one(self):
+        self.configure()
+        new_password = "NewPass#2026"
+        self.responses = [login_reply(),
+                          k01.Reply(200, {"success": True, "error_code": 0,
+                                          "msg": "修改密码成功", "changepwd_err_count": 0})]
+        actual = await self.client.change_password({"newPassword": new_password,
+                                                     "confirmPassword": new_password})
+        self.assertTrue(actual["success"])
+        self.assertTrue(actual["passwordChanged"])
+        self.assertEqual(self.calls[1][1:], (
+            k01.CHANGE_PASSWORD_PATH,
+            {"username": "apiuser", "oldpwd": PASSWORD,
+             "newpwd": new_password, "confirmpwd": new_password},
+            ACCESS))
+        self.assertEqual(self.client.config.password, new_password)
+        self.assertIsNone(self.client.token)
+        disk = json.loads((Path(self.folder.name) / "config.json").read_text())
+        self.assertEqual(disk["k01"]["password"], new_password)
+        output = self.log.getvalue() + json.dumps(actual, ensure_ascii=False)
+        self.assertIn("k01-password-changed", output)
+        for secret in (ACCESS, PASSWORD, PAIRING, new_password):
+            self.assertNotIn(secret, output)
+
+    async def test_change_password_failure_reports_upstream_reason_without_secrets(self):
+        self.configure()
+        new_password = "NewPass#2026"
+        self.responses = [login_reply(),
+                          k01.Reply(200, {"success": False, "error_code": 10101,
+                                          "msg": f"旧密码错误 {PASSWORD} {new_password} {ACCESS}"})]
+        with self.assertRaises(k01.K01Error) as raised:
+            await self.client.change_password({"newPassword": new_password,
+                                                "confirmPassword": new_password})
+        error = raised.exception
+        self.assertEqual(error.code, "K01_PASSWORD_CHANGE_FAILED")
+        self.assertEqual(error.stage, "change-password")
+        self.assertEqual(error.diagnostic_code, "password_change_rejected")
+        self.assertIn("旧密码错误", error.message)
+        payload = json.dumps(error.payload(), ensure_ascii=False)
+        for secret in (ACCESS, PASSWORD, PAIRING, new_password):
+            self.assertNotIn(secret, payload)
+        self.assertEqual(self.client.config.password, PASSWORD)
 
     async def test_cache_is_bounded_by_count_ttl_force_and_independent_copies(self):
         self.configure(cacheSeconds=30)
@@ -588,6 +686,7 @@ class HttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_all_k01_routes_require_existing_pairing_token_before_body_validation(self):
         for method, path in (("GET", "/v1/intelligence/status"), ("GET", "/v1/intelligence/config"),
                              ("PUT", "/v1/intelligence/config"), ("POST", "/v1/intelligence/config"),
+                             ("POST", "/v1/intelligence/change-password"),
                              ("POST", "/v1/intelligence/trace")):
             with self.subTest(method=method, path=path):
                 response = await self.client.request(method, path, content=b"{", headers={"Authorization": ""})
@@ -607,6 +706,21 @@ class HttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn('"password":', response.text)
         await self.client.put("/v1/intelligence/config", json={"password": ""})
         self.assertEqual(self.intelligence.config.password, PASSWORD)
+
+    async def test_change_password_route_updates_saved_credential_without_echoing_it(self):
+        await self.client.put("/v1/intelligence/config", json=CONFIG)
+        new_password = "NewPass#2026"
+        self.intelligence.transport = _SequenceTransport([
+            login_reply(),
+            k01.Reply(200, {"success": True, "error_code": 0, "msg": "修改密码成功"})])
+        response = await self.client.post("/v1/intelligence/change-password", json={
+            "newPassword": new_password, "confirmPassword": new_password})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["passwordChanged"])
+        self.assertEqual(self.intelligence.config.password, new_password)
+        for secret in (PASSWORD, ACCESS, PAIRING, new_password):
+            self.assertNotIn(secret, response.text)
+        self.assertNotIn('"password":', response.text)
 
     async def test_trace_id_header_round_trip_and_error_diagnostics(self):
         response = await self.client.post("/v1/intelligence/trace", json={"host": "example.invalid"},

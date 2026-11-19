@@ -42,7 +42,7 @@ from k01_intelligence import (K01IntelligenceClient, K01Error, new_trace_id, nor
 import windows_icmp
 
 API_VERSION = 1
-SERVICE_VERSION = "1.6.4"
+SERVICE_VERSION = "1.6.6"
 # K01 payloads are stamped with this build so the userscript log names the exe that answered.
 set_service_version(SERVICE_VERSION)
 MAX_DNS_ADDRESSES = 64
@@ -906,6 +906,25 @@ def create_app(settings=None, policy=None, engine=None, logger=None, intelligenc
         finally:
             reset_trace_id(token)
 
+    async def intelligence_change_password(request: Request):
+        denied = authenticate(request)
+        if denied is not None:
+            return denied
+        trace_id = request_trace_id(request)
+        token = set_trace_id(trace_id)
+        try:
+            payload = await intelligence_payload(request)
+            response = JSONResponse(await intelligence.change_password(payload))
+            response.headers["X-Trace-Id"] = trace_id
+            return response
+        except K01Error as error:
+            return intelligence_error(error, trace_id)
+        except (ValueError, TypeError, RecursionError):
+            return intelligence_error(K01Error("K01_INVALID_REQUEST",
+                                               "请输入 8–16 位且两次一致的新密码。", 422), trace_id)
+        finally:
+            reset_trace_id(token)
+
     async def http_error(request: Request, error: HTTPException):
         return JSONResponse({"detail": error.detail}, status_code=error.status_code, headers=error.headers)
 
@@ -917,6 +936,7 @@ def create_app(settings=None, policy=None, engine=None, logger=None, intelligenc
         Route("/v1/probes/{job_id}", cancel, methods=["DELETE"]),
         Route("/v1/intelligence/status", intelligence_status, methods=["GET"]),
         Route("/v1/intelligence/config", intelligence_config, methods=["GET", "POST", "PUT"]),
+        Route("/v1/intelligence/change-password", intelligence_change_password, methods=["POST"]),
         Route("/v1/intelligence/trace", intelligence_trace, methods=["POST"]),
     ])
     app.state.engine = engine
