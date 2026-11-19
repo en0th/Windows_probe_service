@@ -90,7 +90,7 @@ class TargetValidationTests(unittest.TestCase):
 class BatchValidationTests(unittest.TestCase):
     def test_json_round_trip_includes_original_api_defaults(self):
         payload = {"queryId": "q1", "targets": [{"id": "t1", "host": PUBLIC, "port": None}],
-                   "excludedHosts": [], "excludedCidrs": [], "dnsServers": ["8.8.8.8", "223.5.5.5", "223.6.6.6", "180.76.76.76"],
+                   "excludedHosts": [], "excludedCidrs": [], "dnsServers": ["8.8.8.8", "223.5.5.5", "223.6.6.6", "180.76.76.76"], "cdnCidrs": [],
                    "pingCount": 5, "tcpAttempts": 3, "timeoutMs": 3000, "skipCdn": True}
         self.assertEqual(batch().model_dump(), payload)
         self.assertEqual(ProbeBatch.model_validate(json.loads(json.dumps(payload))).model_dump(), payload)
@@ -115,6 +115,15 @@ class BatchValidationTests(unittest.TestCase):
         for value in (0, 1, "true", "false", None, [], {}):
             with self.subTest(value=value), self.assertRaises(ValidationError):
                 batch(skipCdn=value)
+
+    def test_cdn_cidrs_are_normalized_deduplicated_and_strict(self):
+        parsed = batch(cdnCidrs=["203.0.113.10", " 203.0.113.0/24 ", "203.0.113.10"])
+        self.assertEqual(parsed.cdnCidrs, ["203.0.113.10/32", "203.0.113.0/24"])
+        self.assertEqual(batch().cdnCidrs, [])
+        for value in (None, True, "203.0.113.0/24", [None], [True], [123], [""],
+                      ["203.0.113.0/33"], ["2001:db8::/32"], ["203.0.113.1\nwhoami"]):
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                batch(cdnCidrs=value)
 
     def test_query_id_is_required_strict_and_bounded(self):
         self.assertEqual(batch(queryId="q" * 160).queryId, "q" * 160)

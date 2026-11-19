@@ -1,6 +1,6 @@
 # SOAR Windows 本地连通性服务
 
-本服务 v1.6.12 配合当前工作台脚本使用，支持 K01 威胁情报查询。原有 IPv4、域名 DNS/Ping/TCP 探测继续兼容 v21.0 及更新脚本。查询成功后，探测结果显示在已有表格中；情报查询通过目标旁独立图标打开详情抽屉。网络探测和情报查询均独立于告警处置判断。
+本服务 v1.6.13 配合当前工作台脚本使用，支持 K01 威胁情报查询。原有 IPv4、域名 DNS/Ping/TCP 探测继续兼容 v21.0 及更新脚本。查询成功后，探测结果显示在已有表格中；情报查询通过目标旁独立图标打开详情抽屉。网络探测和情报查询均独立于告警处置判断。
 
 **仅探测公网 IPv4，排除已知 CDN/WAF、DNS 服务器、内网和特殊地址。** IPv6、`0.0.0.0`、回环、链路本地、组播、保留和特殊用途地址直接跳过。域名只查询 A 记录并检查 CNAME，服务端逐个检查解析出的 IPv4，随后只向已检查的数字 IPv4 发起检测；不会再次解析域名后直接连接。
 
@@ -177,7 +177,7 @@ Windows EXE 必须在 Windows 上构建，不能将 macOS 产物转换或改名�
 | `skipped_safety` | 命中内置默认安全过滤清单，没有发起探测 |
 | `skipped_ipv6` | 仅支持 IPv4，没有发起探测 |
 
-默认每个 IPv4 固定 Ping 5 次、每个 TCP 端口固定连接 3 次、单次操作超时 3000 ms。每次操作都记录到 `attemptDetails`，前端逐条显示；任一 Ping 有回应或任一 TCP 连接成功即判定目标连通，全部失败才判定不可达。脚本 v25.22 的探测配置可修改次数（各 1–10）和单次超时（200–10000 ms），并可显式关闭“命中 CDN/WAF 时跳过 Ping/TCP 探测”；这些设置随每次任务下发并参与缓存/共享任务隔离。
+默认每个 IPv4 固定 Ping 5 次、每个 TCP 端口固定连接 3 次、单次操作超时 3000 ms。每次操作都记录到 `attemptDetails`，前端逐条显示；任一 Ping 有回应或任一 TCP 连接成功即判定目标连通，全部失败才判定不可达。脚本 v25.23 的探测配置可修改次数（各 1–10）和单次超时（200–10000 ms），可显式关闭“命中 CDN/WAF 时跳过 Ping/TCP 探测”，并可额外填写“CDN 跳过网段”（IPv4/CIDR，最多 2048 条）；这些设置随每次任务下发并参与缓存/共享任务隔离。
 
 Windows Ping 使用原生 IPv4 `IcmpSendEcho`，不解析中英文 `ping.exe` 输出，无须开启 Telnet 客户端，也不使用原始套接字。TCP 使用 asyncio 建立连接并立即关闭，等同于使用 Telnet 验证端口是否能建立连接，不发送登录或业务数据。Ping 超时、不可达或出错也会继续检测端口。端口规则如下：
 
@@ -207,9 +207,9 @@ Windows Ping 使用原生 IPv4 `IcmpSendEcho`，不解析中英文 `ping.exe` �
 
 除 `GET/HEAD /health` 外，都要求 `Authorization: Bearer <token>`，仅接受本机来源和本机 Host。底层继续使用 Starlette 与纯 Python 校验；v1.4.0 增加可选的 dnsServers 字段，旧客户端省略时保持原行为。
 
-- `GET/HEAD /health`：匿名健康检查；`customDnsServers: true` 表示支持请求级备用 DNS，`dnsServers` 为默认备用列表；`probeSettings: true`、`defaultPingCount`、`defaultTcpAttempts`、`defaultProbeTimeoutMs` 表示支持请求级 Ping/Telnet 次数和超时；`cdnSkipConfigurable: true` 表示支持请求级 `skipCdn`。
+- `GET/HEAD /health`：匿名健康检查；`customDnsServers: true` 表示支持请求级备用 DNS，`dnsServers` 为默认备用列表；`probeSettings: true`、`defaultPingCount`、`defaultTcpAttempts`、`defaultProbeTimeoutMs` 表示支持请求级 Ping/Telnet 次数和超时；`cdnSkipConfigurable: true` 表示支持请求级 `skipCdn`；`cdnCidrsSupported: true` 表示支持请求级 `cdnCidrs`。
 - `GET /v1/auth-check`：认证检查，不创建任务、不执行 DNS/ICMP/TCP。
-- `POST /v1/probes`：提交 `{"queryId":"q1","excludedHosts":["93.184.216.34"],"excludedCidrs":["210.39.0.0/20"],"pingCount":5,"tcpAttempts":3,"timeoutMs":3000,"targets":[{"id":"t1","host":"example.com","port":443}]}`，返回 HTTP 202 和 `jobId/queryId/total/cursor`。`port` 可省略或为 `null`：域名按 80、443 检测，IPv4 只检测 Ping；有 `port` 时只检测指定端口。`excludedHosts` 为兼容旧客户端保留，可省略，最多 200 个规范 IPv4；`excludedCidrs` 可省略，最多 2048 个规范 IPv4 地址或网络地址 CIDR。脚本 v21.0 从统一安全过滤清单生成排除规则。`dnsServers` 可省略或传 IPv4 字符串数组，默认 `["8.8.8.8","223.5.5.5","223.6.6.6","180.76.76.76"]`，明确传 `[]` 表示仅系统 DNS；最多 8 个，去重保序，不能为 null。`pingCount`、`tcpAttempts` 可省略，默认均为 5 和 3，范围各 1–10；`timeoutMs` 可省略，默认 3000，范围 200–10000；`skipCdn` 可省略，默认 `true`，显式传 `false` 时跳过 CDN/WAF 判定并继续 Ping/TCP。所有排除配置、有序 DNS 配置、重试次数和超时均参与缓存与共享任务隔离，并检查域名解析后的地址。
+- `POST /v1/probes`：提交 `{"queryId":"q1","excludedHosts":["93.184.216.34"],"excludedCidrs":["210.39.0.0/20"],"pingCount":5,"tcpAttempts":3,"timeoutMs":3000,"targets":[{"id":"t1","host":"example.com","port":443}]}`，返回 HTTP 202 和 `jobId/queryId/total/cursor`。`port` 可省略或为 `null`：域名按 80、443 检测，IPv4 只检测 Ping；有 `port` 时只检测指定端口。`excludedHosts` 为兼容旧客户端保留，可省略，最多 200 个规范 IPv4；`excludedCidrs` 可省略，最多 2048 个规范 IPv4 地址或网络地址 CIDR。脚本 v21.0 从统一安全过滤清单生成排除规则。`dnsServers` 可省略或传 IPv4 字符串数组，默认 `["8.8.8.8","223.5.5.5","223.6.6.6","180.76.76.76"]`，明确传 `[]` 表示仅系统 DNS；最多 8 个，去重保序，不能为 null。`pingCount`、`tcpAttempts` 可省略，默认均为 5 和 3，范围各 1–10；`timeoutMs` 可省略，默认 3000，范围 200–10000；`skipCdn` 可省略，默认 `true`，显式传 `false` 时跳过 CDN/WAF 判定并继续 Ping/TCP；`cdnCidrs` 可省略，默认 `[]`，用于追加请求级 CDN 跳过网段（最多 2048 条 IPv4/CIDR），仅在 `skipCdn:true` 时生效。所有排除配置、有序 DNS 配置、重试次数和超时均参与缓存与共享任务隔离，并检查域名解析后的地址。
 - `GET /v1/probes/{jobId}?after=0`：返回任务状态、`total/completed/cursor` 和该游标之后完成的 `results`。使用上次返回的 `cursor` 继续读取；结果完成顺序不保证与提交顺序一致，使用目标 `id` 回填。
 - `DELETE /v1/probes/{jobId}`：取消该任务后续结果。尚未开始且无人订阅的共享目标会跳过；已发出的单次 ICMP/TCP 在有限超时内结束，其他任务订阅的共享目标继续执行。
 
@@ -226,10 +226,10 @@ Windows Ping 使用原生 IPv4 `IcmpSendEcho`，不解析中英文 `ping.exe` �
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-192 项离线测试通过模拟 DNS、ICMP、TCP 和本地 HTTP ASGI 请求检查自定义 DNS 顺序、仅系统模式、解析服务器排除、配置快照与缓存隔离，以及策略、队列、去重、取消和协议，包括认证顺序、严格 JSON/类型校验及正文大小限制，不向真实目标发起网络探测。GitHub Actions 在 Windows 上执行测试，并实际启动生成的两种 EXE 验证冻结资源、依赖移除、健康接口和令牌认证；便携 ZIP 会完整解压后再次验证。构建环境不复现部署机器的 Smart App Control 策略，测试通过不等同于已获得该机器的策略批准。实际目标的网络可达性取决于部署机器；详细证据记录在日志中。
+195 项离线测试通过模拟 DNS、ICMP、TCP 和本地 HTTP ASGI 请求检查自定义 DNS 顺序、仅系统模式、解析服务器排除、配置快照与缓存隔离，以及策略、队列、去重、取消和协议，包括认证顺序、严格 JSON/类型校验及正文大小限制，不向真实目标发起网络探测。GitHub Actions 在 Windows 上执行测试，并实际启动生成的两种 EXE 验证冻结资源、依赖移除、健康接口和令牌认证；便携 ZIP 会完整解压后再次验证。构建环境不复现部署机器的 Smart App Control 策略，测试通过不等同于已获得该机器的策略批准。实际目标的网络可达性取决于部署机器；详细证据记录在日志中。
 
 
-## K01 威胁情报（v1.6.12）
+## K01 威胁情报（v1.6.13）
 
 脚本 v25.5 在 IPv4、域名复制按钮旁提供独立情报图标，并恢复 `/soar/scripts/script` 页面的“JSON 参数”和“清空变量”工具，点击打开详情抽屉。先在脚本设置中配置本地服务连接，再配置 K01 HTTPS 地址和 API 组账号。API 用户通过 `/api/cms/user/login` 获取访问令牌，资源请求使用 Bearer 调用 `/api/v1/threatintelligence/api/traceability`。账户配置保存在现有用户数据目录 `config.json` 的 `k01` 字段，现有配对令牌和探测配置保留。密码字段留空保留原密码，“清除已保存密码”明确清除。API 密码与访问令牌不随配置查询返回。
 

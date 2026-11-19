@@ -66,7 +66,7 @@ function Test-BundledExecutable {
     if ($selfTest.status -ne 'ok' -or $selfTest.frozen -ne $true -or $selfTest.bundleLayout -ne $Layout) { throw 'The EXE did not confirm bundled runtime/resources in its self-test.' }
     if ($selfTest.httpStack -ne 'starlette' -or $selfTest.validationImplementation -ne 'python' -or $selfTest.pydanticCoreBundled -isnot [bool] -or $selfTest.pydanticCoreBundled -ne $false) { throw 'The EXE did not confirm the Starlette/Python implementation without pydantic_core.' }
     if ($selfTest.customDnsServers -ne $true -or ($selfTest.dnsServers -join ',') -ne '8.8.8.8,223.5.5.5,223.6.6.6,180.76.76.76') { throw 'The EXE self-test did not confirm configurable DNS support.' }
-    if ($selfTest.k01Intelligence -ne $true -or $selfTest.k01PasswordChange -ne $true -or $selfTest.cdnSkipConfigurable -ne $true) { throw 'The EXE self-test did not confirm K01 or configurable CDN-skip support.' }
+    if ($selfTest.k01Intelligence -ne $true -or $selfTest.k01PasswordChange -ne $true -or $selfTest.cdnSkipConfigurable -ne $true -or $selfTest.cdnCidrsSupported -ne $true) { throw 'The EXE self-test did not confirm K01 or configurable CDN support.' }
 
     if ($Layout -eq 'onedir') {
         $expectedRuntimeRoot = [System.IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $exePath) '_internal'))
@@ -111,7 +111,7 @@ function Test-BundledExecutable {
         if ($null -eq $health -or $health.status -ne 'ok' -or $health.platform -ne 'windows' -or $health.ipv4Only -ne $true) { throw 'The bundled Windows IPv4 service did not become healthy.' }
         if ($health.domainNslookup -ne $true -or $health.domainPing -ne $true -or $health.domainDnsFallback -ne $true -or ($health.domainDefaultPorts -join ',') -ne '80,443') { throw 'The bundled service is missing domain DNS fallback or default TCP ports.' }
         if ($health.customDnsServers -ne $true -or ($health.dnsServers -join ',') -ne '8.8.8.8,223.5.5.5,223.6.6.6,180.76.76.76') { throw 'The bundled service is missing configurable DNS capability.' }
-        if ($health.k01Intelligence -ne $true -or $health.k01PasswordChange -ne $true -or $health.cdnSkipConfigurable -ne $true) { throw 'The bundled service is missing K01 or configurable CDN-skip capability.' }
+        if ($health.k01Intelligence -ne $true -or $health.k01PasswordChange -ne $true -or $health.cdnSkipConfigurable -ne $true -or $health.cdnCidrsSupported -ne $true) { throw 'The bundled service is missing K01 or configurable CDN capability.' }
         $auth = Invoke-RestMethod -Uri ($smokeUrl + '/v1/auth-check') -Headers @{ Authorization = 'Bearer ' + $smokeConfig.token } -TimeoutSec 3
         if ($auth.status -ne 'ok' -or $auth.apiVersion -ne 1) { throw 'The bundled service failed its authenticated check.' }
         $k01Config = Invoke-RestMethod -Uri ($smokeUrl + '/v1/intelligence/config') -Headers @{ Authorization = 'Bearer ' + $smokeConfig.token } -TimeoutSec 3
@@ -130,7 +130,7 @@ function Test-BundledExecutable {
         # Exercise the new frozen API schema using a special address that the
         # policy must skip. No DNS, Ping or TCP target traffic is permitted here.
         $probeHeaders = @{ Authorization = 'Bearer ' + $smokeConfig.token }
-        $probeBody = @{ queryId = 'ci-dns-schema'; targets = @(@{ id = 'filtered'; host = '0.0.0.0'; port = $null }); dnsServers = @('192.168.1.53'); skipCdn = $false } | ConvertTo-Json -Depth 6
+        $probeBody = @{ queryId = 'ci-dns-schema'; targets = @(@{ id = 'filtered'; host = '0.0.0.0'; port = $null }); dnsServers = @('192.168.1.53'); skipCdn = $false; cdnCidrs = @('203.0.113.0/24') } | ConvertTo-Json -Depth 6
         $probeJob = Invoke-RestMethod -Uri ($smokeUrl + '/v1/probes') -Method Post -ContentType 'application/json' -Body $probeBody -Headers $probeHeaders -TimeoutSec 3
         if ($probeJob.queryId -ne 'ci-dns-schema' -or $probeJob.total -ne 1 -or [string]::IsNullOrWhiteSpace($probeJob.jobId)) { throw 'The bundled service did not accept a valid custom DNS request.' }
         $probeResult = $null

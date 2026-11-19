@@ -114,8 +114,8 @@ def _exclusions(values, field: str, maximum: int, *, cidrs: bool) -> list[str]:
     for index, value in enumerate(values):
         if not isinstance(value, str):
             raise ValidationError("Input should be a valid string", loc=(field, index), error_type="string_type")
-        message = ("excludedCidrs must contain canonical IPv4 addresses or CIDRs" if cidrs
-                   else "excludedHosts must contain IPv4 addresses")
+        message = (f"{field} must contain canonical IPv4 addresses or CIDRs" if cidrs
+                   else f"{field} must contain IPv4 addresses")
         try:
             address = ipaddress.ip_network(value.strip(), strict=True) if cidrs else ipaddress.ip_address(value.strip())
         except ValueError as exc:
@@ -189,6 +189,7 @@ class ProbeBatch:
     excludedHosts: list[str]
     excludedCidrs: list[str]
     dnsServers: list[str]
+    cdnCidrs: list[str]
     pingCount: int
     tcpAttempts: int
     timeoutMs: int
@@ -196,7 +197,8 @@ class ProbeBatch:
 
     def __init__(self, **data):
         _check_fields(data, {"queryId", "targets", "excludedHosts", "excludedCidrs", "dnsServers",
-                             "pingCount", "tcpAttempts", "timeoutMs", "skipCdn"}, ("queryId", "targets"))
+                             "cdnCidrs", "pingCount", "tcpAttempts", "timeoutMs", "skipCdn"},
+                      ("queryId", "targets"))
         query_id = _string(data["queryId"], "queryId", 160)
         raw_targets = _list(data["targets"], "targets", MAX_TARGETS, minimum=1)
         targets, ids = [], set()
@@ -212,6 +214,7 @@ class ProbeBatch:
         excluded_hosts = _exclusions(data.get("excludedHosts", []), "excludedHosts", 200, cidrs=False)
         excluded_cidrs = _exclusions(data.get("excludedCidrs", []), "excludedCidrs", 2048, cidrs=True)
         dns_servers = normalize_dns_servers(data.get("dnsServers", list(DEFAULT_DNS_SERVERS)))
+        cdn_cidrs = _exclusions(data.get("cdnCidrs", []), "cdnCidrs", 2048, cidrs=True)
         ping_count = _bounded_int(data.get("pingCount", DEFAULT_PING_COUNT),
                                   "pingCount", 1, MAX_PING_COUNT)
         tcp_attempts = _bounded_int(data.get("tcpAttempts", DEFAULT_TCP_ATTEMPTS),
@@ -224,6 +227,7 @@ class ProbeBatch:
         object.__setattr__(self, "excludedHosts", excluded_hosts)
         object.__setattr__(self, "excludedCidrs", excluded_cidrs)
         object.__setattr__(self, "dnsServers", dns_servers)
+        object.__setattr__(self, "cdnCidrs", cdn_cidrs)
         object.__setattr__(self, "pingCount", ping_count)
         object.__setattr__(self, "tcpAttempts", tcp_attempts)
         object.__setattr__(self, "timeoutMs", timeout_ms)
@@ -236,12 +240,13 @@ class ProbeBatch:
         if not isinstance(value, dict):
             raise ValidationError("Input should be a valid object", error_type="model_type")
         _check_fields(value, {"queryId", "targets", "excludedHosts", "excludedCidrs", "dnsServers",
-                              "pingCount", "tcpAttempts", "timeoutMs", "skipCdn"}, ("queryId", "targets"))
+                              "cdnCidrs", "pingCount", "tcpAttempts", "timeoutMs", "skipCdn"},
+                      ("queryId", "targets"))
         return cls(**value)
 
     def model_dump(self) -> dict:
         return {"queryId": self.queryId, "targets": [target.model_dump() for target in self.targets],
                 "excludedHosts": list(self.excludedHosts), "excludedCidrs": list(self.excludedCidrs),
-                "dnsServers": list(self.dnsServers), "pingCount": self.pingCount,
-                "tcpAttempts": self.tcpAttempts, "timeoutMs": self.timeoutMs,
-                "skipCdn": self.skipCdn}
+                "dnsServers": list(self.dnsServers), "cdnCidrs": list(self.cdnCidrs),
+                "pingCount": self.pingCount, "tcpAttempts": self.tcpAttempts,
+                "timeoutMs": self.timeoutMs, "skipCdn": self.skipCdn}

@@ -300,6 +300,32 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         skipped = await self.engine.probe("a.edge.example.invalid", 443, ping_count=1, tcp_attempts=1)
         self.assertEqual(skipped["dns"]["status"], "skipped_cdn")
 
+    async def test_custom_cdn_cidrs_skip_by_default_and_can_be_disabled(self):
+        self.engine._ping = AsyncMock(return_value={"address": OTHER, "status": "reachable"})
+        self.engine._tcp = AsyncMock(return_value={"address": OTHER, "port": 443, "status": "open"})
+        skipped = await self.engine.probe(OTHER, 443, ping_count=1, tcp_attempts=1,
+                                           cdn_cidrs=("45.33.32.0/24",))
+        self.assertEqual(skipped["ping"][0]["status"], "skipped_cdn")
+        self.assertEqual(skipped["ping"][0]["source"], "request.cdnCidrs")
+        self.engine._ping.assert_not_called(); self.engine._tcp.assert_not_called()
+        probed = await self.engine.probe(OTHER, 443, ping_count=1, tcp_attempts=1,
+                                          cdn_cidrs=("45.33.32.0/24",), skip_cdn=False)
+        self.assertEqual(probed["ping"][0]["status"], "reachable")
+        self.assertEqual(probed["tcp"][0]["status"], "open")
+
+    async def test_custom_cdn_cidrs_isolate_cache_and_inflight_work(self):
+        self.engine.probe = AsyncMock(return_value={"resolved": [OTHER], "dns": {"status": "ok"}, "ping": [], "tcp": []})
+        first = self.engine.submit(batch(host=OTHER, cdnCidrs=["203.0.113.0/24"]))
+        second = self.engine.submit(batch(host=OTHER, cdnCidrs=["198.51.100.0/24"]))
+        self.assertEqual(len(self.engine.inflight), 2)
+        await self.engine.start()
+        await asyncio.wait_for(self.engine.queue.join(), 1)
+        self.assertEqual(self.engine.probe.await_count, 2)
+        cached = self.engine.submit(batch(host=OTHER, cdnCidrs=["203.0.113.0/24"]))
+        await asyncio.wait_for(self.engine.queue.join(), 1)
+        self.assertEqual(self.engine.probe.await_count, 2)
+        self.assertTrue(self.engine.snapshot(cached.id)["results"][0]["cached"])
+
     async def test_skip_cdn_setting_isolates_cache_and_inflight_work(self):
         self.engine.probe = AsyncMock(return_value={"resolved": [PUBLIC], "dns": {"status": "ok"}, "ping": [], "tcp": []})
         on = self.engine.submit(batch(skipCdn=True))

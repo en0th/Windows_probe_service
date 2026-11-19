@@ -1,5 +1,13 @@
 # 发布说明
 
+## v1.6.13
+
+- **新增请求级 CDN 跳过网段**：`/v1/probes` 增加可选字段 `cdnCidrs`，接受最多 2048 条规范 IPv4 地址或 CIDR；在 `skipCdn:true` 时，命中这些网段的 IP 返回 `skipped_cdn`，来源为 `request.cdnCidrs`，不再执行 Ping/TCP。
+- `cdnCidrs` 与内置 CDN 判定叠加，但仍让安全过滤、私网、DNS 和自定义排除规则优先；`skipCdn:false` 时内置和请求级 CDN 跳过都关闭。
+- 字段参与缓存、共享任务和 inflight 隔离；`/health` 与 `--self-test` 增加 `cdnCidrsSupported: true`，Windows 构建 smoke test 覆盖该字段。
+- 工作台脚本 v25.23：网络探测配置新增“CDN 跳过网段”文本框，每行一个 IPv4/CIDR；最多 2048 条。
+- 离线测试增至 195 项。
+
 ## v1.6.12
 
 - **新增 CDN 跳过的显性开关**：`/v1/probes` 增加可选布尔字段 `skipCdn`，默认 `true`，保持原来的 CDN/WAF 跳过行为；显式传 `false` 时忽略 CDN 域名、CNAME 和 CDN IP 网段判定，继续对目标执行 Ping/TCP，但安全过滤、私网、DNS、自定义排除等规则仍然生效。
