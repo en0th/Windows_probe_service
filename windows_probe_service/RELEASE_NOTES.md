@@ -1,3 +1,7 @@
+## v1.6.15
+
+- Fix the Windows build smoke payload so it keeps the special IPv4 target skipped while still exercising the new skip switches. Functional changes are those of v1.6.14.
+
 ## v1.6.14
 
 - All skip categories are now explicit per-job switches: `skipPrivate`, `skipDns`, `skipSafety`, and `skipCdn`; defaults remain `true` for compatibility.

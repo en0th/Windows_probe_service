@@ -130,7 +130,7 @@ function Test-BundledExecutable {
         # Exercise the new frozen API schema using a special address that the
         # policy must skip. No DNS, Ping or TCP target traffic is permitted here.
         $probeHeaders = @{ Authorization = 'Bearer ' + $smokeConfig.token }
-        $probeBody = @{ queryId = 'ci-dns-schema'; targets = @(@{ id = 'filtered'; host = '0.0.0.0'; port = $null }); dnsServers = @('192.168.1.53'); skipCdn = $false; skipPrivate = $false; skipDns = $false; skipSafety = $false; cdnCidrs = @('203.0.113.0/24') } | ConvertTo-Json -Depth 6
+        $probeBody = @{ queryId = 'ci-dns-schema'; targets = @(@{ id = 'filtered'; host = '0.0.0.0'; port = $null }); dnsServers = @('192.168.1.53'); skipCdn = $false; skipPrivate = $true; skipDns = $false; skipSafety = $false; cdnCidrs = @('203.0.113.0/24') } | ConvertTo-Json -Depth 6
         $probeJob = Invoke-RestMethod -Uri ($smokeUrl + '/v1/probes') -Method Post -ContentType 'application/json' -Body $probeBody -Headers $probeHeaders -TimeoutSec 3
         if ($probeJob.queryId -ne 'ci-dns-schema' -or $probeJob.total -ne 1 -or [string]::IsNullOrWhiteSpace($probeJob.jobId)) { throw 'The bundled service did not accept a valid custom DNS request.' }
         $probeResult = $null
