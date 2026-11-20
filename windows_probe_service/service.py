@@ -45,7 +45,7 @@ from k01_intelligence import (K01IntelligenceClient, K01Error, new_trace_id, nor
 import windows_icmp
 
 API_VERSION = 1
-SERVICE_VERSION = "1.6.13"
+SERVICE_VERSION = "1.6.14"
 # K01 payloads are stamped with this build so the userscript log names the exe that answered.
 set_service_version(SERVICE_VERSION)
 MAX_DNS_ADDRESSES = 64
@@ -113,7 +113,7 @@ def run_self_test() -> dict:
             "pydanticCoreBundled": False,
             "k01Intelligence": True, "k01PasswordChange": True,
             "probeSettings": True, "cdnSkipConfigurable": True, "cdnCidrsSupported": True,
-            "customDnsServers": True, "dnsServers": list(DEFAULT_DNS_SERVERS),
+            "cdnOnlyCidrs": True, "skipOptionsConfigurable": True, "customDnsServers": True, "dnsServers": list(DEFAULT_DNS_SERVERS),
             "nativeDependencies": {"pythonRuntime": str(python_runtime)},
             "ipv4Only": True, "cdnRulesVersion": policy.version,
             "cdnCidrs": len(policy.cidrs), "cdnDomainSuffixes": len(policy.domains),
@@ -307,6 +307,9 @@ class Entry:
     tcp_attempts: int = DEFAULT_TCP_ATTEMPTS
     timeout_ms: int = DEFAULT_PROBE_TIMEOUT_MS
     skip_cdn: bool = DEFAULT_SKIP_CDN
+    skip_private: bool = True
+    skip_dns: bool = True
+    skip_safety: bool = True
     cdn_cidrs: tuple = ()
     watchers: list = field(default_factory=list)
     started: bool = False
@@ -409,11 +412,13 @@ class ProbeEngine:
         excluded_cidrs = tuple(sorted(batch.excludedCidrs))
         dns_servers = tuple(batch.dnsServers)
         ping_count, tcp_attempts, timeout_ms = batch.pingCount, batch.tcpAttempts, batch.timeoutMs
-        skip_cdn = batch.skipCdn
+        skip_cdn, skip_private = batch.skipCdn, batch.skipPrivate
+        skip_dns, skip_safety = batch.skipDns, batch.skipSafety
         cdn_cidrs = tuple(batch.cdnCidrs)
         def target_key(target):
             return (target.host, target.port, exclusions, excluded_cidrs, dns_servers,
-                    cdn_cidrs, ping_count, tcp_attempts, timeout_ms, skip_cdn)
+                    cdn_cidrs, ping_count, tcp_attempts, timeout_ms, skip_cdn,
+                    skip_private, skip_dns, skip_safety)
         new_keys = {target_key(t) for t in batch.targets} - self.inflight.keys() - self.cache.keys()
         if self.queue.qsize() + len(new_keys) > self.settings.queue_size:
             raise CapacityError("probe_queue_full")
@@ -429,7 +434,9 @@ class ProbeEngine:
                 entry = Entry(key, target.host, target.port, excluded_hosts=exclusions,
                               excluded_cidrs=excluded_cidrs, dns_servers=dns_servers,
                               ping_count=ping_count, tcp_attempts=tcp_attempts,
-                              timeout_ms=timeout_ms, skip_cdn=skip_cdn, cdn_cidrs=cdn_cidrs)
+                              timeout_ms=timeout_ms, skip_cdn=skip_cdn,
+                              skip_private=skip_private, skip_dns=skip_dns,
+                              skip_safety=skip_safety, cdn_cidrs=cdn_cidrs)
                 self.inflight[key] = entry
                 self.queue.put_nowait(entry)
             self.inflight[key].watchers.append((job.id, target))
@@ -437,7 +444,8 @@ class ProbeEngine:
                  uniqueTargets=len({(t.host, t.port) for t in batch.targets}),
                  excludedHosts=list(exclusions), excludedCidrs=list(excluded_cidrs), dnsServers=list(dns_servers),
                  pingCount=ping_count, tcpAttempts=tcp_attempts, timeoutMs=timeout_ms,
-                 skipCdn=skip_cdn, cdnCidrs=list(cdn_cidrs))
+                 skipCdn=skip_cdn, skipPrivate=skip_private, skipDns=skip_dns,
+                 skipSafety=skip_safety, cdnCidrs=list(cdn_cidrs))
         return job
 
     def cancel(self, job_id):
@@ -488,7 +496,9 @@ class ProbeEngine:
                                               excluded_hosts=entry.excluded_hosts, excluded_cidrs=entry.excluded_cidrs,
                                               dns_servers=entry.dns_servers, ping_count=entry.ping_count,
                                               tcp_attempts=entry.tcp_attempts, timeout_ms=entry.timeout_ms,
-                                              skip_cdn=entry.skip_cdn, cdn_cidrs=entry.cdn_cidrs)
+                                              skip_cdn=entry.skip_cdn, skip_private=entry.skip_private,
+                                              skip_dns=entry.skip_dns, skip_safety=entry.skip_safety,
+                                              cdn_cidrs=entry.cdn_cidrs)
                 except AbandonedProbe:
                     continue
                 except Exception as exc:
@@ -658,21 +668,22 @@ class ProbeEngine:
     async def probe(self, host, port, should_continue=None, excluded_hosts=(), excluded_cidrs=(),
                     dns_servers=DEFAULT_DNS_SERVERS, ping_count=DEFAULT_PING_COUNT,
                     tcp_attempts=DEFAULT_TCP_ATTEMPTS, timeout_ms=None, skip_cdn=DEFAULT_SKIP_CDN,
-                    cdn_cidrs=()):
+                    skip_private=True, skip_dns=True, skip_safety=True, cdn_cidrs=()):
         token = _PROBE_TIMEOUT_MS.set(timeout_ms if timeout_ms is not None else self.settings.timeout_ms)
         try:
             return await self._probe_impl(host, port, should_continue=should_continue,
                                           excluded_hosts=excluded_hosts, excluded_cidrs=excluded_cidrs,
                                           dns_servers=dns_servers, ping_count=ping_count,
                                           tcp_attempts=tcp_attempts, skip_cdn=skip_cdn,
-                                          cdn_cidrs=cdn_cidrs)
+                                          skip_private=skip_private, skip_dns=skip_dns,
+                                          skip_safety=skip_safety, cdn_cidrs=cdn_cidrs)
         finally:
             _PROBE_TIMEOUT_MS.reset(token)
 
     async def _probe_impl(self, host, port, should_continue=None, excluded_hosts=(), excluded_cidrs=(),
                           dns_servers=DEFAULT_DNS_SERVERS, ping_count=DEFAULT_PING_COUNT,
                           tcp_attempts=DEFAULT_TCP_ATTEMPTS, skip_cdn=DEFAULT_SKIP_CDN,
-                          cdn_cidrs=()):
+                          skip_private=True, skip_dns=True, skip_safety=True, cdn_cidrs=()):
         try:
             literal_address = ipaddress.ip_address(host)
         except ValueError:
@@ -686,17 +697,20 @@ class ProbeEngine:
                   "nslookup": nslookup, "ping": [], "tcp": []}
         request_networks = tuple(ipaddress.ip_network(value, strict=True) for value in excluded_cidrs)
         cdn_networks = tuple(ipaddress.ip_network(value, strict=True) for value in cdn_cidrs)
-        if port in {53, 853}:
+        if skip_dns and port in {53, 853}:
             skip = {"status": "skipped_dns", "reason": "dns_service_port", "rule": str(port), "source": "built_in_dns_policy"}
             if is_domain:
                 nslookup.update(skip)
             return {**result, "dns": {"elapsedMs": 0, **skip}, "skipped": skip}
         domain_skip = self.policy.domain(host)
-        if domain_skip and skip_cdn:
+        # Built-in/custom CDN suffix rules are informational only. CDN skipping
+        # is now driven exclusively by the request's cdnCidrs list; DNS-hostname
+        # exclusions from policy.domain still apply.
+        if skip_dns and domain_skip and domain_skip.get("status") == "skipped_dns":
             if is_domain:
-                nslookup.update({"status": "skipped_cdn", **domain_skip})
-            return {**result, "dns": {"status": "skipped_cdn", "elapsedMs": 0, **domain_skip},
-                    "skipped": {"status": "skipped_cdn", **domain_skip}}
+                nslookup.update(domain_skip)
+            return {**result, "dns": {"status": "skipped_dns", "elapsedMs": 0, **domain_skip},
+                    "skipped": {"status": "skipped_dns", **domain_skip}}
         started = time.monotonic()
         try:
             if is_domain:
@@ -717,10 +731,12 @@ class ProbeEngine:
             if is_domain:
                 nslookup.update(status="ok", answers=addresses[:MAX_DNS_ADDRESSES], aliases=list(aliases),
                                 elapsedMs=result["dns"]["elapsedMs"])
-            alias_skip = next((self.policy.domain(alias) for alias in aliases if self.policy.domain(alias)), None)
-            if alias_skip and skip_cdn:
-                return {**result, "dns": {**result["dns"], "status": "skipped_cdn", **alias_skip},
-                        "skipped": {"status": "skipped_cdn", **alias_skip}}
+            alias_skip = next((skip for alias in aliases
+                               for skip in (self.policy.domain(alias),)
+                               if skip and skip.get("status") == "skipped_dns"), None) if skip_dns else None
+            if alias_skip:
+                return {**result, "dns": {**result["dns"], "status": "skipped_dns", **alias_skip},
+                        "skipped": {"status": "skipped_dns", **alias_skip}}
             if len(addresses) > MAX_DNS_ADDRESSES:
                 result["resolved"] = addresses[:MAX_DNS_ADDRESSES]
                 result["dns"].update(status="error", error="dns_address_limit_exceeded")
@@ -747,7 +763,11 @@ class ProbeEngine:
             if should_continue is not None and not should_continue():
                 raise AbandonedProbe()
             policy_skip = self.policy.address(address)
-            if not skip_cdn and policy_skip and policy_skip.get("status") == "skipped_cdn":
+            policy_status = (policy_skip or {}).get("status")
+            if ((policy_status == "skipped_cdn") or
+                    (policy_status == "skipped_private" and not skip_private) or
+                    (policy_status == "skipped_dns" and not skip_dns) or
+                    (policy_status == "skipped_safety" and not skip_safety)):
                 policy_skip = None
             custom_cdn_rule = None
             if skip_cdn and (policy_skip is None or policy_skip.get("status") == "skipped_cdn"):
@@ -759,7 +779,7 @@ class ProbeEngine:
             else:
                 skipped = ({"status": "skipped_dns", "reason": "configured_dns_server",
                             "rule": address, "source": "request.dnsServers"}
-                           if address in dns_servers else policy_skip)
+                           if skip_dns and address in dns_servers else policy_skip)
             if skipped is None and address in excluded_hosts:
                 skipped = {"status": "skipped_custom", "reason": "custom_exclusion",
                            "rule": address, "source": "request.excludedHosts"}
@@ -863,7 +883,7 @@ def create_app(settings=None, policy=None, engine=None, logger=None, intelligenc
                 "domainDnsFallback": True, "customDnsServers": True, "dnsServers": list(DEFAULT_DNS_SERVERS),
                 "k01Intelligence": True, "k01PasswordChange": True,
                 "probeSettings": True, "cdnSkipConfigurable": True, "cdnCidrsSupported": True,
-                "defaultPingCount": DEFAULT_PING_COUNT,
+                "cdnOnlyCidrs": True, "skipOptionsConfigurable": True, "defaultPingCount": DEFAULT_PING_COUNT,
                 "defaultTcpAttempts": DEFAULT_TCP_ATTEMPTS,
                 "defaultProbeTimeoutMs": DEFAULT_PROBE_TIMEOUT_MS,
                 "domainDefaultPorts": list(DOMAIN_DEFAULT_PORTS),

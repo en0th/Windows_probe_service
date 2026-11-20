@@ -1,3 +1,10 @@
+## v1.6.14
+
+- All skip categories are now explicit per-job switches: `skipPrivate`, `skipDns`, `skipSafety`, and `skipCdn`; defaults remain `true` for compatibility.
+- Built-in CDN suffix/CIDR rules no longer cause probe skips. CDN skipping uses only request-level `cdnCidrs`; built-in/custom policy CDN entries are ignored by the probe path.
+- `cdnCidrs`, all skip switches, attempt counts, timeout, DNS list, and exclusions participate in cache/share/inflight isolation. `/health` and `--self-test` advertise `skipOptionsConfigurable: true` and `cdnOnlyCidrs: true`.
+- Workstation script v25.25 exposes checkboxes for private/special-address skip, DNS-server/port skip, built-in safety-list skip, and custom CDN skip. Offline tests: 198.
+
 # 发布说明
 
 ## v1.6.13

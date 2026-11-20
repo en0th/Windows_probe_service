@@ -112,13 +112,14 @@ class CustomDnsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["nslookup"]["attempts"][0]["error"], "dns_nodata")
         self.engine._ping.assert_not_called(); self.engine._tcp.assert_not_called()
 
-    async def test_successful_answer_is_filtered_without_trying_a_later_custom_server(self):
+    async def test_successful_answer_is_not_retried_even_when_some_ips_are_filtered(self):
         calls = []
+        self.successful_probes()
         with self.use_resolvers({"system": (["104.16.1.1", "10.8.0.1"], "a.edge.example.invalid")}, calls):
-            result = await self.engine.probe(DOMAIN, None, dns_servers=(ENTERPRISE, CUSTOM))
+            result = await self.engine.probe(DOMAIN, None, dns_servers=(ENTERPRISE, CUSTOM), ping_count=1, tcp_attempts=1)
         self.assertEqual([item["server"] for item in calls], ["system"])
-        self.assertEqual(result["skipped"]["status"], "skipped_cdn")
-        self.engine._ping.assert_not_called(); self.engine._tcp.assert_not_called()
+        self.assertEqual([item["status"] for item in result["ping"]], ["reachable", "skipped_private"])
+        self.engine._ping.assert_awaited_once_with("104.16.1.1")
 
     async def test_configured_dns_literals_are_skipped_without_global_policy_mutation(self):
         result = await self.engine.probe(PUBLIC, 8443, dns_servers=(PUBLIC, ENTERPRISE))
@@ -182,6 +183,7 @@ class CustomDnsTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(health["probeSettings"], True)
             self.assertIs(health["cdnSkipConfigurable"], True)
             self.assertIs(health["cdnCidrsSupported"], True)
+            self.assertIs(health["skipOptionsConfigurable"], True)
             self.assertEqual(health["defaultPingCount"], 5)
             self.assertEqual(health["defaultTcpAttempts"], 3)
             self.assertEqual(health["defaultProbeTimeoutMs"], 3000)
@@ -197,6 +199,9 @@ class CustomDnsTests(unittest.IsolatedAsyncioTestCase):
             payload["tcpAttempts"] = 3
             payload["timeoutMs"] = 3000
             payload["skipCdn"] = False
+            payload["skipPrivate"] = False
+            payload["skipDns"] = False
+            payload["skipSafety"] = False
             payload["cdnCidrs"] = ["203.0.113.0/24"]
             self.assertEqual((await client.post("/v1/probes", json=payload)).status_code, 202)
             payload["cdnCidrs"] = ["203.0.113.0/33"]
@@ -205,6 +210,9 @@ class CustomDnsTests(unittest.IsolatedAsyncioTestCase):
             payload["skipCdn"] = "false"
             self.assertEqual((await client.post("/v1/probes", json=payload)).status_code, 422)
             payload["skipCdn"] = True
+            payload["skipPrivate"] = "false"
+            self.assertEqual((await client.post("/v1/probes", json=payload)).status_code, 422)
+            payload["skipPrivate"] = True
             payload["timeoutMs"] = 199
             self.assertEqual((await client.post("/v1/probes", json=payload)).status_code, 422)
 

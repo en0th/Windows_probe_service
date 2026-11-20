@@ -70,7 +70,7 @@ class DnsEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["tcp"][0]["status"], "open")
 
     async def test_protected_domains_and_dns_ports_do_not_lookup_or_probe(self):
-        for host, port, status in [("dns.google", None, "skipped_dns"), ("a.edge.example.invalid", 443, "skipped_cdn"), (DOMAIN, 53, "skipped_dns")]:
+        for host, port, status in [("dns.google", None, "skipped_dns"), (DOMAIN, 53, "skipped_dns")]:
             with self.subTest(host=host, port=port):
                 result = await self.engine.probe(host, port)
                 self.assertEqual(result["nslookup"]["status"], status)
@@ -90,16 +90,18 @@ class DnsEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.engine._ping.assert_not_called()
         self.engine._tcp.assert_not_called()
 
-    async def test_cdn_alias_keeps_real_lookup_evidence_but_stops_ping_and_tcp(self):
+    async def test_cdn_alias_keeps_lookup_evidence_and_does_not_imply_skip_without_cdn_cidrs(self):
         self.engine._resolve = AsyncMock(return_value=([PUBLIC], ["a.edge.example.invalid"]))
-        result = await self.engine.probe(DOMAIN, 443)
+        self.engine._ping = AsyncMock(return_value={"address": PUBLIC, "status": "reachable"})
+        self.engine._tcp = AsyncMock(return_value={"address": PUBLIC, "port": 443, "status": "open"})
+        result = await self.engine.probe(DOMAIN, 443, ping_count=1, tcp_attempts=1)
         self.assertEqual(result["nslookup"]["status"], "ok")
         self.assertEqual(result["nslookup"]["answers"], [PUBLIC])
         self.assertEqual(result["nslookup"]["aliases"], ["a.edge.example.invalid"])
-        self.assertEqual(result["skipped"]["status"], "skipped_cdn")
+        self.assertNotIn("skipped", result)
         self.engine._resolve.assert_awaited_once_with(DOMAIN, should_continue=None, dns_servers=service.DEFAULT_DNS_SERVERS)
-        self.engine._ping.assert_not_called()
-        self.engine._tcp.assert_not_called()
+        self.engine._ping.assert_awaited_once_with(PUBLIC)
+        self.engine._tcp.assert_awaited_once_with(PUBLIC, 443)
 
     async def test_lookup_failures_have_explicit_error_kind_and_do_not_probe(self):
         cases = [(service.dns.resolver.NXDOMAIN(), "error", "dns_nxdomain"),

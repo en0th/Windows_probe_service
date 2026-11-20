@@ -160,16 +160,18 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.engine._ping = AsyncMock(return_value={"address": PUBLIC, "status": "reachable"})
         self.engine._tcp = AsyncMock(return_value={"address": PUBLIC, "port": 443, "status": "open"})
         result = await self.engine.probe("origin.example.invalid", 443, ping_count=1, tcp_attempts=1)
+        self.assertEqual([call.args for call in self.engine._ping.await_args_list], [("104.16.1.2",), (PUBLIC,)])
+        self.assertEqual([call.args for call in self.engine._tcp.await_args_list], [("104.16.1.2", 443), (PUBLIC, 443)])
+        self.assertEqual([x["status"] for x in result["ping"]], ["skipped_private", "reachable", "skipped_dns", "reachable"])
+
+    async def test_domain_cname_cdn_does_not_skip_without_request_cdn_cidrs(self):
+        self.engine._resolve = AsyncMock(return_value=([PUBLIC], ["node.edge.example.invalid"]))
+        self.engine._ping = AsyncMock(return_value={"address": PUBLIC, "status": "reachable"})
+        self.engine._tcp = AsyncMock(return_value={"address": PUBLIC, "port": 443, "status": "open"})
+        result = await self.engine.probe("origin.example.invalid", 443, ping_count=1, tcp_attempts=1)
+        self.assertEqual(result["dns"]["status"], "ok")
         self.engine._ping.assert_awaited_once_with(PUBLIC)
         self.engine._tcp.assert_awaited_once_with(PUBLIC, 443)
-        self.assertEqual([x["status"] for x in result["ping"]], ["skipped_private", "skipped_cdn", "skipped_dns", "reachable"])
-
-    async def test_domain_cname_cdn_stops_all_probes(self):
-        self.engine._resolve = AsyncMock(return_value=([PUBLIC], ["node.edge.example.invalid"]))
-        result = await self.engine.probe("origin.example.invalid", 443)
-        self.assertEqual(result["dns"]["status"], "skipped_cdn")
-        self.engine._ping.assert_not_called()
-        self.engine._tcp.assert_not_called()
 
     async def test_ipv6_and_dns_port_have_no_io(self):
         result = await self.engine.probe("2606:4700::1", 443)
@@ -284,21 +286,47 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.engine._ping.assert_awaited_once_with(PUBLIC)
         self.engine._tcp.assert_not_called()
 
-    async def test_skip_cdn_false_probes_direct_cdn_ip_and_cdn_domain(self):
+    async def test_builtin_cdn_rules_do_not_skip_without_request_cdn_cidrs(self):
         self.engine._ping = AsyncMock(side_effect=lambda address: {"address": address, "status": "reachable"})
         self.engine._tcp = AsyncMock(side_effect=lambda address, port: {"address": address, "port": port, "status": "open"})
-        direct = await self.engine.probe(OTHER, 443, ping_count=1, tcp_attempts=1, skip_cdn=False)
+        direct = await self.engine.probe(OTHER, 443, ping_count=1, tcp_attempts=1)
         self.assertEqual(direct["ping"][0]["status"], "reachable")
         self.assertEqual(direct["tcp"][0]["status"], "open")
         self.engine._resolve = AsyncMock(return_value=(["104.16.1.2"], []))
-        domain = await self.engine.probe("a.edge.example.invalid", 443, ping_count=1, tcp_attempts=1, skip_cdn=False)
+        domain = await self.engine.probe("a.edge.example.invalid", 443, ping_count=1, tcp_attempts=1)
         self.assertEqual(domain["dns"]["status"], "ok")
         self.assertEqual(domain["ping"][0]["status"], "reachable")
         self.assertEqual(domain["tcp"][0]["status"], "open")
-        # The default remains skip-on.
-        self.engine._resolve = AsyncMock(return_value=(["104.16.1.2"], []))
-        skipped = await self.engine.probe("a.edge.example.invalid", 443, ping_count=1, tcp_attempts=1)
-        self.assertEqual(skipped["dns"]["status"], "skipped_cdn")
+
+    async def test_skip_category_switches_allow_private_dns_safety_and_port53_probes(self):
+        self.engine._ping = AsyncMock(side_effect=lambda address: {"address": address, "status": "reachable"})
+        self.engine._tcp = AsyncMock(side_effect=lambda address, port: {"address": address, "port": port, "status": "open"})
+        private = await self.engine.probe("10.1.2.3", 443, ping_count=1, tcp_attempts=1, skip_private=False)
+        self.assertEqual(private["ping"][0]["status"], "reachable")
+        self.assertEqual(private["tcp"][0]["status"], "open")
+        dns = await self.engine.probe("8.8.8.8", 443, ping_count=1, tcp_attempts=1, skip_dns=False)
+        self.assertEqual(dns["ping"][0]["status"], "reachable")
+        self.assertEqual(dns["tcp"][0]["status"], "open")
+        dns_port = await self.engine.probe(PUBLIC, 53, ping_count=1, tcp_attempts=1, skip_dns=False)
+        self.assertEqual(dns_port["ping"][0]["status"], "reachable")
+        self.assertEqual(dns_port["tcp"][0]["status"], "open")
+        safety = await self.engine.probe("210.39.0.1", 443, ping_count=1, tcp_attempts=1, skip_safety=False)
+        self.assertEqual(safety["ping"][0]["status"], "reachable")
+        self.assertEqual(safety["tcp"][0]["status"], "open")
+
+    async def test_skip_category_switches_isolate_cache_and_inflight_work(self):
+        self.engine.probe = AsyncMock(return_value={"resolved": [PUBLIC], "dns": {"status": "ok"}, "ping": [], "tcp": []})
+        on = self.engine.submit(batch(skipPrivate=True))
+        off = self.engine.submit(batch(skipPrivate=False))
+        self.assertEqual(len(self.engine.inflight), 2)
+        await self.engine.start()
+        await asyncio.wait_for(self.engine.queue.join(), 1)
+        self.assertEqual(self.engine.probe.await_count, 2)
+        self.assertEqual({call.kwargs["skip_private"] for call in self.engine.probe.await_args_list}, {True, False})
+        cached = self.engine.submit(batch(skipPrivate=True))
+        await asyncio.wait_for(self.engine.queue.join(), 1)
+        self.assertEqual(self.engine.probe.await_count, 2)
+        self.assertTrue(self.engine.snapshot(cached.id)["results"][0]["cached"])
 
     async def test_custom_cdn_cidrs_skip_by_default_and_can_be_disabled(self):
         self.engine._ping = AsyncMock(return_value={"address": OTHER, "status": "reachable"})

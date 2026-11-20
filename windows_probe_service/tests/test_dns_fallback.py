@@ -108,15 +108,16 @@ class DnsFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item["port"] for item in result["tcp"]], [80, 443, 80, 443])
         self.engine._ping.assert_not_called(); self.engine._tcp.assert_not_called()
 
-    async def test_successful_cdn_cname_is_not_retried_using_other_resolvers(self):
+    async def test_successful_lookup_with_cdn_cname_is_not_retried_using_other_resolvers(self):
         calls = []
         outcomes = {"system": ([PUBLIC], "a.edge.example.invalid")}
-        self.real_lookup()
+        self.real_lookup(); self.successful_probes()
         with patch.object(service.dns.asyncresolver, "Resolver", side_effect=self.resolver_factory(outcomes, calls)):
-            result = await self.engine.probe(DOMAIN, None)
+            result = await self.engine.probe(DOMAIN, None, ping_count=1, tcp_attempts=1)
         self.assertEqual([call["server"] for call in calls], ["system"])
-        self.assertEqual(result["skipped"]["status"], "skipped_cdn")
-        self.engine._ping.assert_not_called(); self.engine._tcp.assert_not_called()
+        self.assertNotIn("skipped", result)
+        self.engine._ping.assert_awaited_once_with(PUBLIC)
+        self.assertEqual([call.args for call in self.engine._tcp.await_args_list], [(PUBLIC, 80), (PUBLIC, 443)])
 
     async def test_cancellation_after_one_failure_prevents_next_dns_attempt(self):
         calls, live = [], [True]

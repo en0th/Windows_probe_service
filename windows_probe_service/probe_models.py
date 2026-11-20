@@ -194,10 +194,14 @@ class ProbeBatch:
     tcpAttempts: int
     timeoutMs: int
     skipCdn: bool
+    skipPrivate: bool
+    skipDns: bool
+    skipSafety: bool
 
     def __init__(self, **data):
         _check_fields(data, {"queryId", "targets", "excludedHosts", "excludedCidrs", "dnsServers",
-                             "cdnCidrs", "pingCount", "tcpAttempts", "timeoutMs", "skipCdn"},
+                             "cdnCidrs", "pingCount", "tcpAttempts", "timeoutMs", "skipCdn",
+                             "skipPrivate", "skipDns", "skipSafety"},
                       ("queryId", "targets"))
         query_id = _string(data["queryId"], "queryId", 160)
         raw_targets = _list(data["targets"], "targets", MAX_TARGETS, minimum=1)
@@ -222,6 +226,9 @@ class ProbeBatch:
         timeout_ms = _bounded_int(data.get("timeoutMs", DEFAULT_PROBE_TIMEOUT_MS),
                                   "timeoutMs", MIN_PROBE_TIMEOUT_MS, MAX_PROBE_TIMEOUT_MS)
         skip_cdn = _strict_bool(data.get("skipCdn", True), "skipCdn")
+        skip_private = _strict_bool(data.get("skipPrivate", True), "skipPrivate")
+        skip_dns = _strict_bool(data.get("skipDns", True), "skipDns")
+        skip_safety = _strict_bool(data.get("skipSafety", True), "skipSafety")
         object.__setattr__(self, "queryId", query_id)
         object.__setattr__(self, "targets", targets)
         object.__setattr__(self, "excludedHosts", excluded_hosts)
@@ -232,6 +239,9 @@ class ProbeBatch:
         object.__setattr__(self, "tcpAttempts", tcp_attempts)
         object.__setattr__(self, "timeoutMs", timeout_ms)
         object.__setattr__(self, "skipCdn", skip_cdn)
+        object.__setattr__(self, "skipPrivate", skip_private)
+        object.__setattr__(self, "skipDns", skip_dns)
+        object.__setattr__(self, "skipSafety", skip_safety)
 
     @classmethod
     def model_validate(cls, value) -> ProbeBatch:
@@ -240,7 +250,8 @@ class ProbeBatch:
         if not isinstance(value, dict):
             raise ValidationError("Input should be a valid object", error_type="model_type")
         _check_fields(value, {"queryId", "targets", "excludedHosts", "excludedCidrs", "dnsServers",
-                              "cdnCidrs", "pingCount", "tcpAttempts", "timeoutMs", "skipCdn"},
+                              "cdnCidrs", "pingCount", "tcpAttempts", "timeoutMs", "skipCdn",
+                              "skipPrivate", "skipDns", "skipSafety"},
                       ("queryId", "targets"))
         return cls(**value)
 
@@ -249,4 +260,6 @@ class ProbeBatch:
                 "excludedHosts": list(self.excludedHosts), "excludedCidrs": list(self.excludedCidrs),
                 "dnsServers": list(self.dnsServers), "cdnCidrs": list(self.cdnCidrs),
                 "pingCount": self.pingCount, "tcpAttempts": self.tcpAttempts,
-                "timeoutMs": self.timeoutMs, "skipCdn": self.skipCdn}
+                "timeoutMs": self.timeoutMs, "skipCdn": self.skipCdn,
+                "skipPrivate": self.skipPrivate, "skipDns": self.skipDns,
+                "skipSafety": self.skipSafety}

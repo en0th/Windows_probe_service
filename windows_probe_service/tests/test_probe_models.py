@@ -91,7 +91,7 @@ class BatchValidationTests(unittest.TestCase):
     def test_json_round_trip_includes_original_api_defaults(self):
         payload = {"queryId": "q1", "targets": [{"id": "t1", "host": PUBLIC, "port": None}],
                    "excludedHosts": [], "excludedCidrs": [], "dnsServers": ["8.8.8.8", "223.5.5.5", "223.6.6.6", "180.76.76.76"], "cdnCidrs": [],
-                   "pingCount": 5, "tcpAttempts": 3, "timeoutMs": 3000, "skipCdn": True}
+                   "pingCount": 5, "tcpAttempts": 3, "timeoutMs": 3000, "skipCdn": True, "skipPrivate": True, "skipDns": True, "skipSafety": True}
         self.assertEqual(batch().model_dump(), payload)
         self.assertEqual(ProbeBatch.model_validate(json.loads(json.dumps(payload))).model_dump(), payload)
 
@@ -124,6 +124,16 @@ class BatchValidationTests(unittest.TestCase):
                       ["203.0.113.0/33"], ["2001:db8::/32"], ["203.0.113.1\nwhoami"]):
             with self.subTest(value=value), self.assertRaises(ValidationError):
                 batch(cdnCidrs=value)
+
+    def test_skip_category_switches_default_on_and_are_strictly_boolean(self):
+        parsed = batch()
+        self.assertTrue(parsed.skipPrivate and parsed.skipDns and parsed.skipSafety)
+        off = batch(skipPrivate=False, skipDns=False, skipSafety=False)
+        self.assertFalse(off.skipPrivate or off.skipDns or off.skipSafety)
+        for field in ("skipPrivate", "skipDns", "skipSafety"):
+            for value in (0, 1, "true", "false", None, [], {}):
+                with self.subTest(field=field, value=value), self.assertRaises(ValidationError):
+                    batch(**{field: value})
 
     def test_query_id_is_required_strict_and_bounded(self):
         self.assertEqual(batch(queryId="q" * 160).queryId, "q" * 160)

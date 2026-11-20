@@ -1,3 +1,12 @@
+# SOARProbe v1.6.14
+
+- All skip categories are now explicit per-job switches: `skipPrivate`, `skipDns`, `skipSafety`, and `skipCdn`; defaults remain `true` for compatibility.
+- Built-in CDN suffix/CIDR rules no longer cause probe skips. CDN skipping uses only request-level `cdnCidrs`; built-in/custom policy CDN entries are ignored by the probe path.
+- `cdnCidrs`, all skip switches, attempt counts, timeout, DNS list, and exclusions participate in cache/share/inflight isolation. `/health` and `--self-test` advertise `skipOptionsConfigurable: true` and `cdnOnlyCidrs: true`.
+- Workstation script v25.25 exposes checkboxes for private/special-address skip, DNS-server/port skip, built-in safety-list skip, and custom CDN skip. Offline tests: 198.
+
+# 发布说明
+
 # SOARProbe v1.6.13
 
 - **新增请求级 CDN 跳过网段**：`/v1/probes` 增加可选字段 `cdnCidrs`，接受最多 2048 条规范 IPv4 地址或 CIDR；在 `skipCdn:true` 时，命中这些网段的 IP 返回 `skipped_cdn`，来源为 `request.cdnCidrs`，不再执行 Ping/TCP。
